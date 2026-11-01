@@ -109,7 +109,7 @@ async def async_setup_entry(
             async_add_entities(new_entities)
 
     _async_add_new_rooms()
-    coordinator.async_add_listener(_async_add_new_rooms)
+    entry.async_on_unload(coordinator.async_add_listener(_async_add_new_rooms))
 
 
 class SwitchBotVacuumBattery(CoordinatorEntity[SwitchBotS10Coordinator], SensorEntity):
