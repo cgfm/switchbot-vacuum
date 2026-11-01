@@ -2,13 +2,11 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 import logging
 import math
 import time
 import uuid
-import zipfile
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -57,6 +55,7 @@ from .const import (
     UPDATE_INTERVAL_SECONDS,
 )
 from .k10_api import CLEAN_MODES, WONDER, K10Api, K10ProtocolError, room_names
+from .route_data import download_route, render_position
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -92,7 +91,7 @@ def _restore_rooms(hass: HomeAssistant, entry: ConfigEntry | None) -> dict[str, 
 
 def _download_map_rooms(
     creds: dict[str, Any], bucket: str, resource: str, region: str = S3_REGION
-) -> dict[str, str] | None:
+) -> dict[str, Any] | None:
     """Download and decode an S10 map entirely in an executor thread.
 
     aiobotocore lazily reads service models and certificates even during async
@@ -122,16 +121,9 @@ def _download_map_rooms(
 
     zip_bytes = asyncio.run(download())
 
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        if "labels.json" not in zf.namelist():
-            return None
-        labels = json.loads(zf.read("labels.json"))
-    rooms = {}
-    for room in labels.get("data", []):
-        room_id = room.get("id", "")
-        if room_id.startswith("ROOM_"):
-            rooms[room_id] = room.get("name", room_id)
-    return rooms
+    from .map_data import decode_map
+
+    return decode_map(zip_bytes)
 
 
 STATUS_PROPS = [PROP_ONLINE, PROP_BATTERY, PROP_WORK_STATUS, PROP_ERROR_CODE,
@@ -168,6 +160,18 @@ class SwitchBotS10Coordinator(DataUpdateCoordinator):
         self._uuid: str = str(uuid.uuid4())
         self._token_expiry: float = 0
         self._rooms: dict[str, str] = _restore_rooms(hass, entry)
+        self.map_data: dict[str, Any] | None = None
+        self.map_updated: datetime | None = None
+        self._last_route_attempt: float = 0
+        self._route_refresh_lock = asyncio.Lock()
+        self._map_bucket: str | None = None
+        self._map_monitor_open = False
+        self._position_key: tuple | None = None
+        self._position_received_at: float = 0
+        self._position_task: str | None = None
+        self._position_index = 0
+        self._route_task: asyncio.Task | None = None
+        self._map_stopping = False
         self._last_room_refresh: float = 0
         self._last_room_attempt: float | None = None
         self._k10_api: K10Api | None = None
@@ -571,6 +575,175 @@ class SwitchBotS10Coordinator(DataUpdateCoordinator):
             "sessionToken": policy["SessionToken"],
         }, region
 
+    async def _async_map_request(self, path: str, extra: dict | None = None) -> dict:
+        """Read the app's map feed (monitor open/close never starts motion)."""
+        async with async_get_clientsession(self.hass).post(
+            f"{self.wonderlab_endpoint}/sweeper/v1/{path}", headers=self._headers(),
+            json={"deviceID": self.device_mac, **(extra or {})},
+            timeout=aiohttp.ClientTimeout(total=15), allow_redirects=False,
+        ) as response:
+            if response.status != 200:
+                raise UpdateFailed(f"Map feed request failed (HTTP {response.status})")
+            result = await response.json()
+        if not isinstance(result, dict) or result.get('resultCode') != 200:
+            raise UpdateFailed('Map feed request failed')
+        return result.get('data') or {}
+
+    async def async_stop_maps(self) -> None:
+        """Cancel route refresh and release monitoring on unload or HA stop."""
+        self._map_stopping = True
+        if self._route_task is not None and not self._route_task.done():
+            self._route_task.cancel()
+            try:
+                await self._route_task
+            except asyncio.CancelledError:
+                pass
+        await self.async_close_map_monitor()
+
+    async def async_close_map_monitor(self) -> None:
+        """Release the app-style map monitor when idle or unloaded."""
+        if self._map_monitor_open:
+            try:
+                await self._async_map_request('task/monitor/close')
+            except Exception as exc:
+                _LOGGER.debug('Map monitor close failed (%s)', type(exc).__name__)
+            finally:
+                self._map_monitor_open = False
+
+    def _clear_robot_position(self) -> None:
+        if self.map_data is not None and self.map_data['attributes'].get('robot_position_available'):
+            self.map_data = self.map_data | {
+                'image': self.map_data.get('_history_image', self.map_data['_base_image']),
+                'attributes': self.map_data['attributes'] | {
+                    'robot_position_available': False, 'robot_position': None,
+                },
+            }
+            self.map_updated = datetime.now().astimezone()
+
+    async def async_refresh_position(self, props: dict) -> None:
+        """Poll only during activity; expire poses when the feed stops advancing."""
+        if self.map_data is None or self._map_stopping:
+            return
+        active = props.get(PROP_WORK_STATUS) in (5, 7, 8, 9, 15, 19)
+        task_info = props.get(1032)
+        task_id = task_info.get('taskId') if isinstance(task_info, dict) else None
+        map_info = props.get(PROP_MAP_INFO)
+        different_map = isinstance(map_info, dict) and map_info.get('mapID') and map_info['mapID'] != self.map_data['attributes']['map_id']
+        if not active or not task_id or different_map:
+            await self.async_close_map_monitor()
+            self._clear_robot_position()
+            self._position_key = None
+            return
+        try:
+            if not self._map_monitor_open:
+                await self._async_map_request('task/monitor/open')
+                self._map_monitor_open = True
+            if task_id != self._position_task:
+                self._position_task, self._position_index = task_id, 0
+            data = await self._async_map_request('task/trackPose', {
+                'taskID': task_id, 'startIndex': self._position_index,
+                'endIndex': self._position_index + 10000,
+            })
+            if type(data.get('endIndex')) is int and data['endIndex'] >= self._position_index:
+                self._position_index = data['endIndex']
+            points = data.get('data')
+            if isinstance(points, list) and points:
+                pose = points[-1]
+                if not isinstance(pose, list) or len(pose) < 4 or not all(
+                    type(v) in (int, float) and math.isfinite(v) for v in pose[:4]
+                ):
+                    raise ValueError('Invalid robot pose')
+                key = (task_id, pose[3])
+                if key != self._position_key:
+                    snapshot = self.map_data
+                    rendered = await self.hass.async_add_executor_job(render_position, snapshot, pose)
+                    if self.map_data is snapshot:
+                        self._position_key = key
+                        self._position_received_at = time.time()
+                        self.map_data = snapshot | {
+                            'image': rendered['image'],
+                            'attributes': snapshot['attributes'] | {
+                                'robot_position_available': True,
+                                'robot_position': {
+                                    'kind': 'last_received', 'task_id': task_id,
+                                    'received_at': datetime.now().astimezone().isoformat(),
+                                    'x': pose[0], 'y': pose[1], 'heading': pose[2],
+                                    'time_offset_ms': pose[3], 'pixel': rendered['pixel'],
+                                },
+                            },
+                        }
+                        self.map_updated = datetime.now().astimezone()
+        except Exception as exc:
+            _LOGGER.debug('Position feed unavailable (%s)', type(exc).__name__)
+        if time.time() - self._position_received_at >= 60:
+            self._clear_robot_position()
+
+    async def async_get_latest_clean_record(self) -> dict[str, Any] | None:
+        """Read the app's completed cleaning reports; never start a task."""
+        await self._ensure_token()
+        async with async_get_clientsession(self.hass).post(
+            f"{self.wonderlab_endpoint}/sweeper/v1/taskRecord/list",
+            headers=self._headers(), json={"deviceID": self.device_mac, "page": 0},
+            timeout=aiohttp.ClientTimeout(total=API_TIMEOUT), allow_redirects=False,
+        ) as response:
+            if response.status != 200:
+                raise UpdateFailed(f"Cleaning report request failed (HTTP {response.status})")
+            result = await response.json()
+        if not isinstance(result, dict) or result.get("resultCode") != 200:
+            raise UpdateFailed("Cleaning report request failed")
+        data = result.get("data")
+        records = data.get("recordList", []) if isinstance(data, dict) else []
+        records = [r for r in records if isinstance(r, dict)
+                   and r.get("action") in ("clean_rooms", "clean_all", "clean_area", "clean_zone")
+                   and r.get("status") == 1 and isinstance(r.get("taskID"), str)
+                   and type(r.get("timestamp")) in (int, float)
+                   and isinstance(r.get("data"), dict)
+                   and isinstance(r["data"].get("resource"), str)]
+        return max(records, key=lambda r: r["timestamp"]) if records else None
+
+    async def async_refresh_last_route(self, force: bool = False) -> None:
+        """Fetch a new completed route, preserving the map if it fails."""
+        if self.map_data is None or self._map_stopping or self._route_refresh_lock.locked():
+            return
+        async with self._route_refresh_lock:
+            self._last_route_attempt = time.time()
+            snapshot = self.map_data
+            try:
+                record = await self.async_get_latest_clean_record()
+                if not record:
+                    return
+                current = snapshot['attributes'].get('last_route', {})
+                if not force and current.get('task_id') == record['taskID']:
+                    return
+                creds, region = await self.async_get_map_policy()
+                route = await self.hass.async_add_executor_job(
+                    download_route, creds, self._map_bucket,
+                    record['data']['resource'], region, snapshot, record,
+                )
+                if self.map_data is not snapshot:
+                    return  # A simultaneous map refresh superseded these pixels.
+                if route.get('status') == 'available':
+                    self.map_data = snapshot | {
+                        'image': route['image'], '_history_image': route['image'],
+                        '_history_rows': route['_history_rows'],
+                        'attributes': snapshot['attributes'] | {
+                            'route_available': True, 'route_status': 'available',
+                            'robot_position_available': False, 'robot_position': None,
+                            'last_route': route['metadata'],
+                        },
+                    }
+                    self._position_key = None
+                    self.map_updated = datetime.now().astimezone()
+                    if self.data:
+                        self.async_set_updated_data(self.data | {'rooms': self._rooms})
+                else:
+                    # Never display a route belonging to another floor/map.
+                    self.map_data = snapshot | {'attributes': snapshot['attributes'] | {
+                        'route_status': route.get('status', 'unavailable'),
+                    }}
+            except Exception as exc:
+                _LOGGER.warning('Failed to refresh historical route (%s)', type(exc).__name__)
+
     async def async_refresh_rooms(self) -> None:
         """Refresh rooms — branches per device type."""
         if self._is_k10() or self._is_k10_pro():
@@ -588,7 +761,7 @@ class SwitchBotS10Coordinator(DataUpdateCoordinator):
 
         room_plans = props.get(PROP_ROOM_PLANS)
         rooms_from_plans = self._extract_rooms_from_room_plans(room_plans)
-        if rooms_from_plans:
+        if rooms_from_plans and not isinstance(props.get(PROP_MAP_INFO), dict):
             self._rooms = rooms_from_plans
             self._last_room_refresh = time.time()
             self._persist_rooms()
@@ -608,7 +781,7 @@ class SwitchBotS10Coordinator(DataUpdateCoordinator):
 
         try:
             creds, region = await self.async_get_map_policy()
-            rooms = await self.hass.async_add_executor_job(
+            map_data = await self.hass.async_add_executor_job(
                 _download_map_rooms, creds, bucket, resource, region
             )
         except Exception as exc:
@@ -618,11 +791,16 @@ class SwitchBotS10Coordinator(DataUpdateCoordinator):
             )
             return
 
-        if rooms is not None:
+        if map_data is not None:
+            self._map_bucket = bucket
+            self.map_data = map_data
+            self.map_updated = datetime.now().astimezone()
+            rooms = map_data["rooms"]
             self._rooms = rooms
             self._last_room_refresh = time.time()
             self._persist_rooms()
             _LOGGER.info("Loaded %d rooms from map", len(rooms))
+            await self.async_refresh_last_route(force=True)
 
     async def _background_room_refresh(self) -> None:
         """Refresh rooms in the background so it doesn't block coordinator updates."""
@@ -723,10 +901,15 @@ class SwitchBotS10Coordinator(DataUpdateCoordinator):
         if self._is_k10_pro():
             return await self._async_update_data_k10_pro()
 
-        props = await self.async_get_properties(STATUS_PROPS)
+        props = await self.async_get_properties(STATUS_PROPS + [1032, PROP_MAP_INFO])
+        await self.async_refresh_position(props)
 
         if time.time() - self._last_room_refresh > 86400:
             self.hass.async_create_task(self._background_room_refresh())
+
+        if not self._map_stopping and self.map_data is not None and time.time() - self._last_route_attempt > 60:
+            self._last_route_attempt = time.time()
+            self._route_task = self.hass.async_create_task(self.async_refresh_last_route())
 
         return {
             "online": props.get(PROP_ONLINE, False),

@@ -1,5 +1,5 @@
 {
-  "name": "SwitchBot Vacuum",
-  "homeassistant": "2024.1.0",
+  "name": "SwitchBot Vacuum (cgfm)",
+  "homeassistant": "2026.8.0",
   "render_readme": true
 }

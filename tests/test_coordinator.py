@@ -62,16 +62,22 @@ class TestLogin:
     @pytest.mark.asyncio
     async def test_login_success(self, mock_hass, mock_entry):
         """Test successful login returns access token."""
-        resp = _make_response({
-            "body": {
-                "access_token": "test_jwt_token",
-                "refresh_token": "test_refresh",
-            }
-        })
-        with _patch_session(resp):
+        responses = [
+            _make_response({"body": {"access_token": "test_jwt_token"}}),
+            _make_response({"body": {"botRegion": "eu"}}),
+            _make_response({"data": [{"name": "wonderlabs", "host": "https://example.invalid"}]}),
+        ]
+        session = AsyncMock()
+        session.__aenter__.return_value = session
+        session.post = MagicMock(side_effect=[
+            AsyncMock(__aenter__=AsyncMock(return_value=response)) for response in responses
+        ])
+        with patch("aiohttp.ClientSession", return_value=session):
             coordinator = SwitchBotS10Coordinator(mock_hass, mock_entry)
             await coordinator.async_login()
-            assert coordinator.access_token == "test_jwt_token"
+        assert coordinator.access_token == "test_jwt_token"
+        assert coordinator.wonderlab_endpoint == "https://example.invalid"
+        assert session.post.call_count == 3
 
     @pytest.mark.asyncio
     async def test_login_failure_raises(self, mock_hass, mock_entry):

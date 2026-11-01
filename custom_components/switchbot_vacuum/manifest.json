@@ -1,12 +1,16 @@
 {
   "domain": "switchbot_vacuum",
   "name": "SwitchBot Vacuum",
-  "version": "0.4.0",
-  "documentation": "https://github.com/jaco/switchbot-vacuum",
-  "issue_tracker": "https://github.com/jaco/switchbot-vacuum/issues",
-  "codeowners": ["@jaczewski"],
+  "version": "0.5.0",
+  "documentation": "https://github.com/cgfm/switchbot-vacuum",
+  "issue_tracker": "https://github.com/cgfm/switchbot-vacuum/issues",
+  "codeowners": [
+    "@cgfm"
+  ],
   "config_flow": true,
   "iot_class": "cloud_polling",
-  "requirements": ["aiobotocore>=2.9.0"],
+  "requirements": [
+    "aiobotocore>=2.9.0"
+  ],
   "dependencies": []
 }

@@ -1,17 +1,15 @@
 """Tests for the SwitchBot S10 vacuum entity."""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from custom_components.switchbot_vacuum.const import (
+    CMD_GO_CHARGE,
     WORK_STATUS_CHARGE_DONE,
     WORK_STATUS_CHARGING,
     WORK_STATUS_CLEANING,
-    WORK_STATUS_GO_CHARGE,
-    WORK_STATUS_PAUSED,
-    WORK_STATUS_STANDBY,
 )
 from custom_components.switchbot_vacuum.vacuum import SwitchBotS10Vacuum
 
@@ -60,19 +58,19 @@ class TestVacuumState:
 
     def test_activity_paused(self, mock_coordinator):
         """Test paused status maps to PAUSED."""
-        mock_coordinator.data["work_status"] = WORK_STATUS_PAUSED
+        mock_coordinator.data["work_status"] = 11  # S10 paused
         vac = SwitchBotS10Vacuum(mock_coordinator)
         assert vac.activity.value == "paused"
 
     def test_activity_returning(self, mock_coordinator):
         """Test go charge maps to RETURNING."""
-        mock_coordinator.data["work_status"] = WORK_STATUS_GO_CHARGE
+        mock_coordinator.data["work_status"] = 15  # S10 returning to charge
         vac = SwitchBotS10Vacuum(mock_coordinator)
         assert vac.activity.value == "returning"
 
-    def test_activity_idle_when_standby(self, mock_coordinator):
-        """Test standby maps to IDLE."""
-        mock_coordinator.data["work_status"] = WORK_STATUS_STANDBY
+    def test_activity_idle_when_sleeping(self, mock_coordinator):
+        """Test the S10 sleeping state maps to IDLE."""
+        mock_coordinator.data["work_status"] = 21  # S10 sleeping
         vac = SwitchBotS10Vacuum(mock_coordinator)
         assert vac.activity.value == "idle"
 
@@ -127,7 +125,7 @@ class TestVacuumCommands:
         vac = SwitchBotS10Vacuum(mock_coordinator)
         await vac.async_return_to_base()
         args = mock_coordinator.async_send_command.call_args
-        assert args[0][0] == 1008  # CMD_GO_CHARGE
+        assert args[0][0] == CMD_GO_CHARGE
 
     @pytest.mark.asyncio
     async def test_set_fan_speed(self, mock_coordinator):

@@ -46,6 +46,7 @@ def coordinator():
     coord._rooms = dict(ROOMS)
     coord._last_room_refresh = 0
     coord._last_room_attempt = None
+    coord.async_refresh_last_route = AsyncMock()
     return coord
 
 
@@ -116,8 +117,13 @@ def map_archive(*, missing_labels=False):
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w") as archive:
         archive.writestr("other.json" if missing_labels else "labels.json", json.dumps({
-            "data": [{"id": "ROOM_TEST_1", "name": "Test room"}, {"id": "CHARGE_TEST"}],
+            "data": [{"id": "ROOM_TEST_1", "name": "Test room", "type": "polygon",
+                      "geometry": [0, 0, 3, 0, 3, 3, 0, 3]}, {"id": "CHARGE_TEST"}],
         }))
+        archive.writestr("mapinfo.json", json.dumps({"uuid": "test-map"}))
+        archive.writestr("map.json", json.dumps({"origin": [0, 0, 0], "resolution": 1}))
+        archive.writestr("markers.json", json.dumps({"data": []}))
+        archive.writestr("map.pgm", b"P5\n4 4\n255\n" + bytes([254]) * 16)
     return output.getvalue()
 
 
@@ -182,7 +188,9 @@ async def test_worker_isolates_sdk_loop_and_closes_resources(failure):
         else:
             rooms = await asyncio.to_thread(module._download_map_rooms, creds,
                                            "test-bucket", "map.zip", "us-west-2")
-            assert rooms == (None if failure == "missing_labels" else ROOMS)
+            assert (None if rooms is None else rooms["rooms"]) == (
+                None if failure == "missing_labels" else ROOMS
+            )
     assert events == ["body closed", "client closed"]
 
 
@@ -194,7 +202,7 @@ async def test_refresh_uses_executor_and_preserves_cache_on_failure(coordinator,
     coordinator.async_get_map_policy = AsyncMock(return_value=({}, "us-west-2"))
     coordinator.hass.async_add_executor_job = AsyncMock(
         side_effect=OSError("fake-private-signed-url") if outcome == "failure" else None,
-        return_value=None if outcome == "missing_labels" else {"ROOM_TEST_2": "New test room"},
+        return_value=None if outcome == "missing_labels" else {"rooms": {"ROOM_TEST_2": "New test room"}},
     )
     with caplog.at_level(logging.WARNING):
         await coordinator.async_refresh_rooms()

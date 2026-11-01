@@ -1,5 +1,9 @@
 # SwitchBot Vacuum for Home Assistant
 
+> **Maintained fork:** This repository is [cgfm/switchbot-vacuum](https://github.com/cgfm/switchbot-vacuum), based on [jaco/switchbot-vacuum](https://github.com/jaco/switchbot-vacuum). Install this fork in HACS to receive this fork's releases. It includes the current-HA battery migration, S10 room-cache/credential repairs, and S10 map/route/position features.
+>
+> Version 0.5.0 was tested with Home Assistant 2026.10.4 and Python 3.14. Historical routes are supported; the position marker represents the last received pose during active tasks, not a guaranteed live position while docked. No account data, floorplans, robot identifiers or personal dashboards are included.
+
 Custom [HACS](https://hacs.xyz/) integration for SwitchBot robot vacuums (S10 and compatible models) in Home Assistant.
 
 ## Why this exists
@@ -40,7 +44,7 @@ K10+ room cleaning is currently limited to the EU region. K10+ Pro room cleaning
 
 ### Tested setup
 
-K10+ support was tested with a **SwitchBot Mini Robot Vacuum K10+ (EU)** in **Home Assistant Container (Docker) 2026.10.1**. The installation included a separate battery compatibility patch required for Home Assistant 2026.8+.
+K10+ support was tested with a **SwitchBot Mini Robot Vacuum K10+ (EU)** in **Home Assistant Container (Docker) 2026.10.1**. The installation included the battery compatibility patch now integrated in this fork.
 
 Verified through Home Assistant: email/password login and reauthentication after a password change, room discovery, device status and battery, starting a selected room with one pass, pausing, changing suction from max to quiet, quiet room cleaning, and emptying the dustbin.
 
@@ -52,7 +56,7 @@ Mop mode, two passes, multi-room cleaning order, multiple physical vacuums, and 
 
 1. Open HACS in Home Assistant
 2. Click the three dots menu → **Custom repositories**
-3. Add `https://github.com/jaco/switchbot-vacuum` with category **Integration**
+3. Add `https://github.com/cgfm/switchbot-vacuum` with category **Integration**
 4. Search for "SwitchBot Vacuum" and install
 5. Restart Home Assistant
 
@@ -86,7 +90,7 @@ The main entity (`vacuum.switchbot_vacuum`) provides:
 | Feature | Description |
 |---------|-------------|
 | **State** | idle, cleaning, docked, paused, returning |
-| **Battery** | Current battery percentage |
+| **Battery** | A separate battery sensor on the same device |
 | **Fan speed** | quiet, standard, strong, max |
 | **Start** | Start full cleaning |
 | **Stop / Pause** | Stop or pause current cleaning |
@@ -109,7 +113,7 @@ The vacuum entity exposes additional attributes you can use in automations and t
 
 ```yaml
 # Get battery level
-{{ state_attr('vacuum.switchbot_vacuum', 'battery_level') }}
+{{ states('sensor.your_vacuum_battery') }}  {# Replace with your actual battery entity ID #}
 
 # Get current clean type
 {{ state_attr('vacuum.switchbot_vacuum', 'clean_type') }}
@@ -324,3 +328,30 @@ K10+ controls require an internet connection and use an unofficial cloud API, wh
 ## License
 
 MIT
+
+## S10 map, historical route and position
+
+An authenticated `image` entity displays the saved cloud map, room boundaries and the latest completed cleaning task's route. The same device-map unique ID is retained when updating an existing installation; existing entity IDs are therefore preserved. New installations use the generic name **Map**. Select the actual image entity in Home Assistant rather than assuming a fixed entity ID.
+
+- Green route lines are cleaning movements; grey lines are other recorded movements. Segments are kept separate and reports from another map UUID are not overlaid.
+- The blue marker is the stored charging station. It is never used as a substitute for the robot's position.
+- An orange marker and heading show the last received robot pose during an active task, polled at the coordinator's approximately 30-second interval. Unchanged pose reports expire after 60 seconds; the marker is removed and monitoring is closed when the robot becomes idle/docked.
+- A reliable continuously updated position while docked has **not** been demonstrated. Old points remaining in the cloud feed do not establish a fresh position.
+- Map data is refreshed on startup and daily, or with `switchbot_vacuum.force_refresh`. The latest completed cleaning report is checked about once a minute and downloaded only when the task changes. A stopped test task may therefore become the newest historical route.
+- The `rooms` attribute provides pixel-space room outlines. Existing map-card/dashboard configuration can use these outlines; this repository contains no installation-specific room-selection script or dashboard.
+
+SDK initialization, TLS loading, archive parsing and PNG generation run in executor workers. Credentials are requested on demand and never stored in the room cache.
+
+## Fork development and release policy
+
+HACS follows releases from **cgfm/switchbot-vacuum**. Upstream changes are not automatically installed or merged into this fork. Reviewed changes are published as explicit release tags. The focused upstream repair branches remain independent from the fork's map/route extensions.
+
+For the isolated test environment used for 0.5.0:
+
+```sh
+python -m venv .venv
+.venv/bin/pip install homeassistant==2026.10.4 aiobotocore pytest pytest-asyncio
+.venv/bin/python -m pytest -q
+```
+
+Tests use synthetic maps, fake HTTP responses and fake robot services; they do not require a SwitchBot account or initiate cleaning.
