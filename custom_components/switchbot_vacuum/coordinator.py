@@ -54,7 +54,7 @@ from .const import (
     TOKEN_REFRESH_SECONDS,
     UPDATE_INTERVAL_SECONDS,
 )
-from .k10_api import CLEAN_MODES, WONDER, K10Api, K10ProtocolError, room_names
+from .k10_api import CLEAN_MODES, K10Api, K10ProtocolError, botslab_region, room_names
 from .route_data import download_route, render_position
 
 _LOGGER = logging.getLogger(__name__)
@@ -834,7 +834,7 @@ class SwitchBotS10Coordinator(DataUpdateCoordinator):
             self.hass.async_create_task(self._background_room_refresh())
 
         properties = {}
-        if self.wonderlab_endpoint and self.wonderlab_endpoint.rstrip("/") == WONDER:
+        if botslab_region(self.wonderlab_endpoint):
             try:
                 session = async_get_clientsession(self.hass)
                 api = await self._authorize_k10_api(session)

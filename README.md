@@ -15,7 +15,7 @@ The official [SwitchBot Cloud integration](https://www.home-assistant.io/integra
 - **Vacuum entity** with full state reporting (cleaning, docked, paused, returning, idle)
 - **Error detection (S10)** — an error sensor with specific error types and a problem binary sensor for automations. K10+ error reporting is not implemented; see the model support table below.
 - **Room sensor entities** — one per room discovered from the vacuum's map
-- **Room-aware cleaning** — clean specific rooms by name or ID. S10 supports mode, suction, water level, passes, and order; K10+ EU supports vacuum/mop mode, suction, passes, and order. K10+ uses a disposable wipe with no water tank or pump.
+- **Room-aware cleaning** — clean specific rooms by name or ID. S10 supports mode, suction, water level, passes, and order; K10+ supports vacuum/mop mode, suction, passes, and order. K10+ uses a disposable wipe with no water tank or pump.
 - **Automatic room discovery** — room names are downloaded from the vacuum's cloud map every 24 hours
 - **Multi-device support** — if your account has multiple SwitchBot vacuums, the config flow lets you pick which one to add
 - **Force refresh service** — manually re-download room data and device status on demand
@@ -40,7 +40,7 @@ Available features depend on the vacuum model and region.
 | Multiple vacuums on one account | Supported | Supported |
 | `force_refresh` for status and rooms | Supported | Supported |
 
-K10+ room cleaning is currently limited to the EU region. K10+ Pro room cleaning is not supported.
+K10+ room cleaning follows the account's SwitchBot region: EU (`eu1`), US (`na1`) and Asia-Pacific (`ap1`). EU and US have been verified with real accounts. K10+ Pro room cleaning is not supported.
 
 ### Tested setup
 
@@ -175,7 +175,7 @@ Each room discovered from the vacuum's map gets a sensor entity (e.g. `sensor.ki
 
 ### `switchbot_vacuum.clean_rooms`
 
-Clean specific rooms by name or ID. The example and mode/suction/water defaults below apply to S10. For K10+ EU, the same service also accepts `mode` (`sweep` or `mop`) and `fan_level` (1–4), as shown in the K10+ section. Water settings and simultaneous sweep/mop do not apply to this hardware.
+Clean specific rooms by name or ID. The example and mode/suction/water defaults below apply to S10. For K10+, the same service also accepts `mode` (`sweep` or `mop`) and `fan_level` (1–4), as shown in the K10+ section. Water settings and simultaneous sweep/mop do not apply to this hardware.
 
 ```yaml
 service: switchbot_vacuum.clean_rooms
@@ -282,7 +282,7 @@ automation:
           entity_id: vacuum.switchbot_vacuum
 ```
 
-## K10+ rooms (EU region)
+## K10+ rooms
 
 Room names and numeric IDs are read from the vacuum's current cloud map. Creating cleaning schedules is not required. Use `switchbot_vacuum.force_refresh` to refresh the map and room sensors.
 
@@ -316,6 +316,10 @@ The device also exposes a **Cleaning mode** select (`vacuum`, `mop`) and an **Em
 Start requests are never retried automatically. If confirmation times out, check the robot before retrying.
 
 K10+ controls require an internet connection and use an unofficial cloud API, which may change.
+
+### K10+ regions
+
+The K10+ is a Qihoo 360 platform robot. Its rooms live on 360's regional cloud (`{region}-sapp-api.botslab.com`), which is chosen from the SwitchBot account's regional host: `wonderlabs.eu…` → `eu1`, `wonderlabs.us…` → `na1`, `wonderlabs.ap…` → `ap1`. Signed map downloads are only followed to that region's Aliyun OSS buckets, and room uploads only go to that region's Aliyun OSS bucket. If a region uses a different upload provider, room cleaning fails with an error naming the provider, and no cleaning is started.
 
 ## Technical notes
 
