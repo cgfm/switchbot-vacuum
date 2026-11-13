@@ -15,7 +15,7 @@ The official [SwitchBot Cloud integration](https://www.home-assistant.io/integra
 - **Vacuum entity** with full state reporting (cleaning, docked, paused, returning, idle)
 - **Error detection (S10)** — an error sensor with specific error types and a problem binary sensor for automations. K10+ error reporting is not implemented; see the model support table below.
 - **Room sensor entities** — one per room discovered from the vacuum's map
-- **Room-aware cleaning** — clean specific rooms by name or ID. S10 supports mode, suction, water level, passes, and order; K10+ EU supports vacuum/mop mode, suction, passes, and order. K10+ uses a disposable wipe with no water tank or pump.
+- **Room-aware cleaning** — clean specific rooms by name or ID. S10 supports mode, suction, water level, passes, and order; K10+ supports vacuum/mop mode, suction, passes, and order. K10+ uses a disposable wipe with no water tank or pump.
 - **Automatic room discovery** — room names are downloaded from the vacuum's cloud map every 24 hours
 - **Multi-device support** — if your account has multiple SwitchBot vacuums, the config flow lets you pick which one to add
 - **Force refresh service** — manually re-download room data and device status on demand
@@ -24,7 +24,7 @@ The official [SwitchBot Cloud integration](https://www.home-assistant.io/integra
 
 Available features depend on the vacuum model and region.
 
-| Capability | S10 | K10+ (EU) |
+| Capability | S10 | K10+ |
 |------------|-----|-----------|
 | Account email/password setup and device selection | Supported | Supported; no manual token capture required |
 | Vacuum activity and battery | Supported | Supported |
@@ -36,11 +36,14 @@ Available features depend on the vacuum model and region.
 | Empty dustbin button | — | Supported while docked |
 | Cleaning mode select | — | Vacuum/mop; selecting a mode does not start cleaning |
 | Room command passes and order | Supported | One or two passes; optional room order |
-| Automatic map refresh every 24 hours | Supported | Supported |
+| Automatic map refresh every 24 hours | Supported | Supported, plus after the robot uploads a new map |
+| Map image with rooms and dock | Supported | Supported (see [K10+ map](#k10-map)) |
+| Robot position on the map | Last received pose during tasks | Reported position, redrawn when it changes |
+| Cleaning path on the map | Latest completed task | Current or last task, followed while cleaning |
 | Multiple vacuums on one account | Supported | Supported |
 | `force_refresh` for status and rooms | Supported | Supported |
 
-K10+ room cleaning is currently limited to the EU region. K10+ Pro room cleaning is not supported.
+K10+ room cleaning and maps follow the account's SwitchBot region: EU (`eu1`), US (`na1`) and Asia-Pacific (`ap1`). EU and US have been verified with real accounts. K10+ Pro room cleaning is not supported.
 
 ### Tested setup
 
@@ -164,7 +167,7 @@ Both entities expose `error_code` (raw integer) and `error_type`/`error_descript
 
 ### Room sensors
 
-Each room discovered from the vacuum's map gets a sensor entity (e.g. `sensor.kitchen`, `sensor.bedroom`). The sensor value is the room name, and the `room_id` attribute contains the internal ID (S10: e.g. `ROOM_013`; K10+: e.g. `room1`).
+Each room discovered from the vacuum's map gets a sensor entity (e.g. `sensor.kitchen`, `sensor.bedroom`). These are diagnostic entities (disabled by default), because rooms are already available for area cleaning, in the vacuum's `rooms` attribute and on the map. Non-diagnostic room sensors created by earlier versions are converted to (enabled) diagnostic entities when upgrading. After upgrading, a Repair prompt is created to disable/hide them (you can ignore it to keep them.) The sensor value is the room name, and the `room_id` attribute contains the internal ID (S10: e.g. `ROOM_013`; K10+: e.g. `room1`).
 
 ```yaml
 # Get room ID for use in clean_rooms service
@@ -173,9 +176,25 @@ Each room discovered from the vacuum's map gets a sensor entity (e.g. `sensor.ki
 
 ## Services
 
+### `vacuum.clean_area` (Home Assistant areas)
+
+The vacuum entity reports its rooms as cleanable segments (S10 and K10+; not K10+ Pro). In the vacuum entity's settings, [map each room](https://www.home-assistant.io/integrations/vacuum/#mapping-your-vacuum-areas-to-home-assistant-areas) to one of your Home Assistant areas. Then use the built-in action, voice assistants, or the standard vacuum UI:
+
+```yaml
+action: vacuum.clean_area
+target:
+  entity_id: vacuum.switchbot_vacuum
+data:
+  cleaning_area_id:
+    - kitchen
+    - dining_room
+```
+
+Rooms are cleaned in the order given, with each room's settings from the SwitchBot app. If rooms are later added or removed in the app, a Repair issue asks you to update the mapping. Renaming a room keeps its mapping. Use `switchbot_vacuum.clean_rooms` below when you need per-run mode, suction or pass overrides.
+
 ### `switchbot_vacuum.clean_rooms`
 
-Clean specific rooms by name or ID. The example and mode/suction/water defaults below apply to S10. For K10+ EU, the same service also accepts `mode` (`sweep` or `mop`) and `fan_level` (1–4), as shown in the K10+ section. Water settings and simultaneous sweep/mop do not apply to this hardware.
+Clean specific rooms by name or ID. The example and mode/suction/water defaults below apply to S10. For K10+, the same service also accepts `mode` (`sweep` or `mop`) and `fan_level` (1–4), as shown in the K10+ section. Water settings and simultaneous sweep/mop do not apply to this hardware.
 
 ```yaml
 service: switchbot_vacuum.clean_rooms
@@ -282,7 +301,7 @@ automation:
           entity_id: vacuum.switchbot_vacuum
 ```
 
-## K10+ rooms (EU region)
+## K10+ rooms
 
 Room names and numeric IDs are read from the vacuum's current cloud map. Creating cleaning schedules is not required. Use `switchbot_vacuum.force_refresh` to refresh the map and room sensors.
 
@@ -317,9 +336,23 @@ Start requests are never retried automatically. If confirmation times out, check
 
 K10+ controls require an internet connection and use an unofficial cloud API, which may change.
 
+### K10+ regions
+
+The K10+ is a Qihoo 360 platform robot. Its rooms and map live on 360's regional cloud (`{region}-sapp-api.botslab.com`), which is chosen from the SwitchBot account's regional host: `wonderlabs.eu…` → `eu1`, `wonderlabs.us…` → `na1`, `wonderlabs.ap…` → `ap1`. Signed map downloads are only followed to that region's Aliyun OSS buckets, and room uploads only go to that region's Aliyun OSS bucket. If a region uses a different upload provider, room cleaning fails with an error naming the provider, and no cleaning is started.
+
+### K10+ map
+
+The **Map** image entity is also created for K10+ (not K10+ Pro). It renders the map the robot uploads after mapping or cleaning: the occupancy grid, the rooms used for room cleaning, no-go zones and the dock. Rooms are filled in their own colours and labelled with their names, no-go zones are drawn in red, and walls and obstacles are dark. Unexplored space is transparent, so the image works on light and dark dashboards. Like the SwitchBot app, the image is rotated 180° from the robot's raw grid.
+
+The map is downloaded every 24 hours. It's also updated after the robot uploads a new map (per the status poll), and on `switchbot_vacuum.force_refresh`. The **Last map refresh** diagnostic sensor shows when Home Assistant last downloaded and rendered it; its `last_error` attribute explains a failed refresh.
+
+The robot's position, heading, and most recent cleaning path (or current in-progress cleaning) are drawn on top of the map. If the robot is active (cleaning or returning to the dock), then it's updated every 15 seconds. Otherwise it's only updated when the map is updated. There's a diagnostic sensor (Last path update) showing the last time the path was updated.
+
+The attributes follow the S10 map: `rooms` (name, pixel `outline` and label `x`/`y`), `charger`, `width`, `height`, `resolution`, `robot_position` (`x`/`y` in robot millimetres, `heading` in milliradians counter-clockwise from the robot's x axis, and `pixel`) and `route_available`, plus `route_points` (the number of path points). The robot reverses onto its dock, so near the dock the marker faces away from the end of the path.
+
 ## Technical notes
 
-- The integration polls the device every 30 seconds
+- The integration polls the device every 30 seconds (every 15 seconds while a K10+ is cleaning or returning to the dock)
 - Auth tokens are refreshed automatically every 1.5 hours
 - Room names are refreshed from the cloud map every 24 hours (or on demand via `force_refresh`); room refresh runs as a background task so it never blocks setup
 - For S10, error codes are read from device property 1019 and mapped to descriptive strings; unknown codes are logged as warnings so they can be reported and added
@@ -346,7 +379,7 @@ SDK initialization, TLS loading, archive parsing and PNG generation run in execu
 
 HACS follows releases from **cgfm/switchbot-vacuum**. Upstream changes are not automatically installed or merged into this fork. Reviewed changes are published as explicit release tags. The focused upstream repair branches remain independent from the fork's map/route extensions.
 
-For the isolated test environment used for 0.5.0:
+For the isolated test environment used for 0.6.0:
 
 ```sh
 python -m venv .venv

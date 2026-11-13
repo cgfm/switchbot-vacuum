@@ -11,7 +11,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, UnitOfTime
+from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfTime
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -90,6 +90,9 @@ async def async_setup_entry(
             for desc in CLEAN_SUMMARY_SENSORS
         )
 
+    if device_type == DEVICE_TYPE_K10:
+        entities += [SwitchBotMapRefreshSensor(coordinator), SwitchBotPathUpdateSensor(coordinator)]
+
     async_add_entities(entities)
 
     known_room_ids: set[str] = set()
@@ -110,6 +113,54 @@ async def async_setup_entry(
 
     _async_add_new_rooms()
     entry.async_on_unload(coordinator.async_add_listener(_async_add_new_rooms))
+
+
+class SwitchBotK10TimestampSensor(CoordinatorEntity[SwitchBotS10Coordinator], SensorEntity):
+    """A K10+ map diagnostic timestamp."""
+
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_has_entity_name = True
+    _key: str
+
+    def __init__(self, coordinator: SwitchBotS10Coordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.device_mac}_{self._key}"
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, coordinator.device_mac)})
+
+
+class SwitchBotMapRefreshSensor(SwitchBotK10TimestampSensor):
+    """When Home Assistant last downloaded and rendered the K10+ map."""
+
+    _key = "last_map_refresh"
+    _attr_name = "Last map refresh"
+    _attr_icon = "mdi:map-clock"
+
+    @property
+    def native_value(self):
+        return self.coordinator.map_refreshed_at
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str | None]:
+        """Explain a stale refresh with the last failure (fixed messages only)."""
+        return {"last_error": self.coordinator.k10_last_error}
+
+
+class SwitchBotPathUpdateSensor(SwitchBotK10TimestampSensor):
+    """When new K10+ cleaning-path points last arrived."""
+
+    _key = "last_path_update"
+    _attr_name = "Last path update"
+    _attr_icon = "mdi:map-marker-path"
+
+    @property
+    def native_value(self):
+        return self.coordinator.path_updated_at
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str | None]:
+        """Tell a failing track read apart from a path with nothing new."""
+        return {"last_error": self.coordinator.k10_track_error}
 
 
 class SwitchBotVacuumBattery(CoordinatorEntity[SwitchBotS10Coordinator], SensorEntity):
@@ -134,7 +185,15 @@ class SwitchBotVacuumBattery(CoordinatorEntity[SwitchBotS10Coordinator], SensorE
 
 
 class SwitchBotRoomSensor(CoordinatorEntity[SwitchBotS10Coordinator], SensorEntity):
-    """Sensor representing a room known to the vacuum."""
+    """Sensor representing a room known to the vacuum.
+
+    Hidden by default: rooms are exposed as vacuum segments for area cleaning,
+    in the vacuum's ``rooms`` attribute and on the map. Enable a sensor to use
+    its ``room_id`` attribute in templates.
+    """
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
 
     def __init__(
         self,

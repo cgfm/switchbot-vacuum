@@ -1,7 +1,10 @@
-"""K10+ EU room protocol reconstructed from SwitchBot Android 10.6.
+"""K10+ room protocol reconstructed from SwitchBot Android 10.6.
 
 The account token stays on SwitchBot; the delegated token stays on Botslab.
 Only the temporary OSS credentials returned for this upload go to storage.
+
+The K10+ is a Qihoo 360 platform robot. SwitchBot's regional "wonderlabs" host
+determines which regional 360 ("botslab") cloud holds the device.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ import email.utils
 import hashlib
 import hmac
 import json
+import re
 import time
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -21,6 +25,7 @@ from urllib.parse import quote, urlparse
 if TYPE_CHECKING:
     from aiohttp import ClientSession
 
+# EU defaults; K10Api picks the account's region when it authorizes.
 API = "https://eu1-sapp-api.botslab.com"
 WONDER = "https://wonderlabs.eu.api.switchbot.net"
 APP_KEY = "toB_woan_adr"
@@ -30,15 +35,45 @@ APP_SECRET = "cec7fba0b848ae747f0af304ce4d1e54"
 ROOM_SUCTION = {1: "quiet", 2: "auto", 3: "strong", 4: "max"}
 CLEAN_MODES = {"sweep": 0, "mop": 2}
 
-MAP_HOSTS = {
-    "eu1-ali-1days.oss-eu-central-1.aliyuncs.com",
-    "eu1-ali-90days.oss-eu-central-1.aliyuncs.com",
-    "eu1-ali-180days.oss-eu-central-1.aliyuncs.com",
-}
+# SwitchBot wonderlabs region label -> Qihoo 360 cloud region. The 360 regions
+# (eu1, na1, ap1) are confirmed by independent Botslab client projects.
+BOTSLAB_REGIONS = {"eu": "eu1", "us": "na1", "na": "na1", "ap": "ap1"}
 
 
 class K10ProtocolError(Exception):
     """A validated K10+ operation could not be completed."""
+
+
+def _switchbot_api_region(wonder_endpoint: str | None) -> str | None:
+    """Return the region label (e.g. ``us``) of a SwitchBot wonderlabs endpoint."""
+    match = re.fullmatch(
+        r"https://wonderlabs\.([a-z0-9]+)\.api\.switchbot\.net/?", wonder_endpoint or ""
+    )
+    return match.group(1) if match else None
+
+
+def botslab_region(wonder_endpoint: str | None) -> str | None:
+    """Return the 360 cloud region for a SwitchBot regional endpoint, if known."""
+    return BOTSLAB_REGIONS.get(_switchbot_api_region(wonder_endpoint))
+
+
+def _regional_bucket(bucket: str, region: str) -> bool:
+    return re.fullmatch(rf"{re.escape(region)}-ali-\d+days", bucket) is not None
+
+
+def _oss_endpoint(endpoint: str) -> bool:
+    return re.fullmatch(r"oss-[a-z0-9-]+\.aliyuncs\.com", endpoint) is not None
+
+
+def trusted_storage_url(url: str, region: str) -> bool:
+    """Signed map URLs must point at one of this region's 360 OSS buckets."""
+    parsed = urlparse(url)
+    bucket, _, endpoint = (parsed.hostname or "").partition(".")
+    return (
+        parsed.scheme == "https"
+        and _regional_bucket(bucket, region)
+        and _oss_endpoint(endpoint)
+    )
 
 
 def signed_params(
@@ -114,15 +149,21 @@ def prepare_rooms(
 
 
 def oss_request(
-    info: dict[str, Any], content: bytes, *, date: str | None = None
+    info: dict[str, Any], content: bytes, *, date: str | None = None, region: str = "eu1"
 ) -> tuple[str, dict[str, str], str]:
     """Build the documented OSS V1 PUT; never forward account tokens to OSS."""
-    if (info["provider"], info["bucket"], info["endpoint"]) != (
-        "aliyun",
-        "eu1-ali-1days",
-        "oss-eu-central-1.aliyuncs.com",
-    ):
-        raise K10ProtocolError("Unsupported room upload storage destination")
+    match info:
+        case {"provider": "aliyun", "bucket": str(bucket), "endpoint": str(endpoint)} if (
+            _regional_bucket(bucket, region) and _oss_endpoint(endpoint)
+        ):
+            pass
+        case {"provider": "aliyun"}:
+            raise K10ProtocolError("Unsupported room upload storage destination")
+        case _:
+            # Report the provider name only; it is needed to add support and is not secret.
+            raise K10ProtocolError(
+                f"Room upload storage provider {str(info.get('provider'))[:20]!r} is not supported"
+            )
     key = info["path"]
     if not key or key.startswith("/") or ".." in key.split("/"):
         raise K10ProtocolError("Invalid room upload path")
@@ -132,12 +173,12 @@ def oss_request(
     content_type = "text/plain"
     canonical = (
         f"PUT\n{md5}\n{content_type}\n{date}\n"
-        f"x-oss-security-token:{sts['security_token']}\n/{info['bucket']}/{key}"
+        f"x-oss-security-token:{sts['security_token']}\n/{bucket}/{key}"
     )
     signature = base64.b64encode(
         hmac.new(sts["accesskey_secret"].encode(), canonical.encode(), hashlib.sha1).digest()
     ).decode("ascii")
-    host = f"{info['bucket']}.{info['endpoint']}"
+    host = f"{bucket}.{endpoint}"
     return (
         f"https://{host}/{quote(key, safe='/')}",
         {
@@ -160,19 +201,28 @@ class K10Api:
         self.installation_id = installation_id
         self.token: str | None = None
         self.token_expiry: float = 0
+        self.region = "eu1"
         self.lock = asyncio.Lock()
+
+    @property
+    def api(self) -> str:
+        return f"https://{self.region}-sapp-api.botslab.com"
 
     async def authorize(
         self, session: ClientSession, wonder_endpoint: str, access_token: str, group_id: str
     ) -> None:
-        if wonder_endpoint.rstrip("/") != WONDER:
-            raise K10ProtocolError("K10 room support has only been verified for the EU region")
+        region = botslab_region(wonder_endpoint)
+        if region is None:
+            raise K10ProtocolError("K10+ room support is not available for this SwitchBot region")
+        if region != self.region:
+            # Clear the token and set the correct region on login.
+            self.region, self.token, self.token_expiry = region, None, 0
         if self.token and self.token_expiry > time.time() + 60:
             return
         async with (
             asyncio.timeout(30),
             session.post(
-                WONDER + "/wonder/sweeper360/v1/auth/applyToken",
+                wonder_endpoint.rstrip("/") + "/wonder/sweeper360/v1/auth/applyToken",
                 headers={"authorization": access_token},
                 json={"groupID": group_id},
                 allow_redirects=False,
@@ -199,7 +249,7 @@ class K10Api:
             asyncio.timeout(30),
             session.request(
                 method,
-                API + path,
+                self.api + path,
                 params=params,
                 data=form,
                 headers={"Authorization": "tokens " + self.token},
@@ -220,6 +270,52 @@ class K10Api:
         if not isinstance(properties, dict):
             raise K10ProtocolError("Invalid K10+ property response")
         return properties
+
+    async def get_clean_track(
+        self, session: ClientSession, start: int = 0, max_points: int = 20000
+    ) -> tuple[list[Any], int]:
+        """Read the current or last cleaning track from point ``start``; read-only.
+
+        Returns (points, total): ``[x, y]`` points in millimetres, and the number
+        of points the robot reports for the whole track.
+        """
+        points: list[Any] = []
+        total = None
+        while len(points) < max_points:
+            result = await self.request(
+                session, "/v1/iot/device/invoke_service",
+                form={
+                    "product_key": self.product_key,
+                    "device_name": self.device_mac,
+                    "identifier": "GetCleanTrackWithPosIdx",
+                    "input": json.dumps(
+                        {"StartPosIndex": start + len(points)}, separators=(",", ":")
+                    ),
+                },
+            )
+            # Some kind of verbose type checking below since this is what we're trying
+            # to match against:
+            # {"code": 0, "data": {"result": {
+            #     "ErrorNO": 0,
+            #     "Track": {
+            #         "pathID": 12, "startPos": 0, "pointCounts": 3, "totalPoints": 1149,
+            #         "posArray": [[-4879, 160], [-4879, 260], [-4878, 360]]}}}}
+            if result.get("code") != 0:
+                raise K10ProtocolError(f"Cannot read cleaning track (code {result.get('code')})")
+            reply = (result.get("data") or {}).get("result")
+            reply = json.loads(reply) if isinstance(reply, str) else reply
+            track = reply.get("Track") if isinstance(reply, dict) else None
+            track = json.loads(track) if isinstance(track, str) else track
+            if not isinstance(track, dict):
+                raise K10ProtocolError("Invalid cleaning track response")
+            total = track.get("totalPoints")
+            page = track.get("posArray")
+            if not isinstance(page, list) or not page:
+                break
+            points.extend(page)
+            if not isinstance(total, int) or start + len(points) >= total:
+                break
+        return points, total if isinstance(total, int) else start + len(points)
 
     async def set_properties(self, session: ClientSession, items: dict[str, int]) -> None:
         """Set only caller-validated properties using the app's form encoding."""
@@ -287,8 +383,7 @@ class K10Api:
         properties = json.loads(data["result"])
         map_info = json.loads(properties["MapPkgOssInfo"])
         url = data["extend"]["s3_signs"][map_info["Url"]]
-        parsed = urlparse(url)
-        if parsed.scheme != "https" or parsed.hostname not in MAP_HOSTS:
+        if not trusted_storage_url(url, self.region):
             raise K10ProtocolError("Unexpected signed map destination")
         async with asyncio.timeout(30), session.get(url, allow_redirects=False) as response:
             if response.status != 200:
@@ -326,7 +421,9 @@ class K10Api:
             if config.get("code") != 0:
                 raise K10ProtocolError("Could not obtain room upload configuration")
             content = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
-            url, headers, robot_url = oss_request(config["data"]["upload_info"], content)
+            url, headers, robot_url = oss_request(
+                config["data"]["upload_info"], content, region=self.region
+            )
             async with (
                 asyncio.timeout(30),
                 session.put(url, headers=headers, data=content, allow_redirects=False) as response,

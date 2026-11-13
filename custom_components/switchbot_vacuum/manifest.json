@@ -1,7 +1,7 @@
 {
   "domain": "switchbot_vacuum",
   "name": "SwitchBot Vacuum",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "documentation": "https://github.com/cgfm/switchbot-vacuum",
   "issue_tracker": "https://github.com/cgfm/switchbot-vacuum/issues",
   "codeowners": [
@@ -12,5 +12,5 @@
   "requirements": [
     "aiobotocore>=2.9.0"
   ],
-  "dependencies": []
+  "dependencies": ["repairs"]
 }
