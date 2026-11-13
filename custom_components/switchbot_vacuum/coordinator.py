@@ -55,6 +55,7 @@ from .const import (
     UPDATE_INTERVAL_SECONDS,
 )
 from .k10_api import CLEAN_MODES, K10Api, K10ProtocolError, botslab_region, room_names
+from .k10_map import decode_k10_map
 from .route_data import download_route, render_position
 
 _LOGGER = logging.getLogger(__name__)
@@ -162,6 +163,10 @@ class SwitchBotS10Coordinator(DataUpdateCoordinator):
         self._rooms: dict[str, str] = _restore_rooms(hass, entry)
         self.map_data: dict[str, Any] | None = None
         self.map_updated: datetime | None = None
+        # K10+: when the map was last downloaded and rendered, or why that failed.
+        self.map_refreshed_at: datetime | None = None
+        self.k10_last_error: str | None = None
+        self._k10_last_reported_map_package: Any = None
         self._last_route_attempt: float = 0
         self._route_refresh_lock = asyncio.Lock()
         self._map_bucket: str | None = None
@@ -464,11 +469,24 @@ class SwitchBotS10Coordinator(DataUpdateCoordinator):
                     f"room{room_id}": name for room_id, name in room_names(map_data).items()
                 }
                 self._last_room_refresh = time.time()
-            except (
-                aiohttp.ClientError, TimeoutError, ValueError, KeyError, TypeError, K10ProtocolError
-            ) as exc:
+            except K10ProtocolError as exc:
+                # Protocol errors carry only fixed messages and numeric codes.
+                self.k10_last_error = str(exc)
+                _LOGGER.warning("K10+ map refresh failed: %s", exc)
+                return
+            except (aiohttp.ClientError, TimeoutError, ValueError, KeyError, TypeError) as exc:
                 # Network exceptions may contain a signed map URL; log only the type.
+                self.k10_last_error = type(exc).__name__
                 _LOGGER.warning("K10+ map refresh failed (%s)", type(exc).__name__)
+                return
+            try:
+                self.map_data = await self.hass.async_add_executor_job(decode_k10_map, map_data)
+            except (ValueError, KeyError, TypeError, IndexError) as exc:
+                self.k10_last_error = f"Map could not be rendered ({type(exc).__name__})"
+                _LOGGER.warning("K10+ %s", self.k10_last_error)
+                return
+            self.map_updated = self.map_refreshed_at = datetime.now().astimezone()
+            self.k10_last_error = None
             return
         try:
             resp = await self.async_send_action("GetCleanPolicyList")
@@ -843,6 +861,11 @@ class SwitchBotS10Coordinator(DataUpdateCoordinator):
                 aiohttp.ClientError, TimeoutError, ValueError, KeyError, TypeError, K10ProtocolError
             ) as exc:
                 _LOGGER.debug("K10+ control properties unavailable (%s)", type(exc).__name__)
+        # The robot uploads a new map package after mapping or cleaning; fetch it.
+        package = properties.get("MapPkgOssInfo")
+        if package and self._k10_last_reported_map_package not in (None, package):
+            self._last_room_refresh = 0
+        self._k10_last_reported_map_package = package or self._k10_last_reported_map_package
         mode = next((name for name, value in CLEAN_MODES.items()
                      if value == properties.get("MopModeSwitching")), None)
 

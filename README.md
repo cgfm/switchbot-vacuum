@@ -24,7 +24,7 @@ The official [SwitchBot Cloud integration](https://www.home-assistant.io/integra
 
 Available features depend on the vacuum model and region.
 
-| Capability | S10 | K10+ (EU) |
+| Capability | S10 | K10+ |
 |------------|-----|-----------|
 | Account email/password setup and device selection | Supported | Supported; no manual token capture required |
 | Vacuum activity and battery | Supported | Supported |
@@ -36,11 +36,12 @@ Available features depend on the vacuum model and region.
 | Empty dustbin button | — | Supported while docked |
 | Cleaning mode select | — | Vacuum/mop; selecting a mode does not start cleaning |
 | Room command passes and order | Supported | One or two passes; optional room order |
-| Automatic map refresh every 24 hours | Supported | Supported |
+| Automatic map refresh every 24 hours | Supported | Supported, plus after the robot uploads a new map |
+| Map image with rooms and dock | Supported | Supported (see [K10+ map](#k10-map)) |
 | Multiple vacuums on one account | Supported | Supported |
 | `force_refresh` for status and rooms | Supported | Supported |
 
-K10+ room cleaning follows the account's SwitchBot region: EU (`eu1`), US (`na1`) and Asia-Pacific (`ap1`). EU and US have been verified with real accounts. K10+ Pro room cleaning is not supported.
+K10+ room cleaning and maps follow the account's SwitchBot region: EU (`eu1`), US (`na1`) and Asia-Pacific (`ap1`). EU and US have been verified with real accounts. K10+ Pro room cleaning is not supported.
 
 ### Tested setup
 
@@ -335,7 +336,15 @@ K10+ controls require an internet connection and use an unofficial cloud API, wh
 
 ### K10+ regions
 
-The K10+ is a Qihoo 360 platform robot. Its rooms live on 360's regional cloud (`{region}-sapp-api.botslab.com`), which is chosen from the SwitchBot account's regional host: `wonderlabs.eu…` → `eu1`, `wonderlabs.us…` → `na1`, `wonderlabs.ap…` → `ap1`. Signed map downloads are only followed to that region's Aliyun OSS buckets, and room uploads only go to that region's Aliyun OSS bucket. If a region uses a different upload provider, room cleaning fails with an error naming the provider, and no cleaning is started.
+The K10+ is a Qihoo 360 platform robot. Its rooms and map live on 360's regional cloud (`{region}-sapp-api.botslab.com`), which is chosen from the SwitchBot account's regional host: `wonderlabs.eu…` → `eu1`, `wonderlabs.us…` → `na1`, `wonderlabs.ap…` → `ap1`. Signed map downloads are only followed to that region's Aliyun OSS buckets, and room uploads only go to that region's Aliyun OSS bucket. If a region uses a different upload provider, room cleaning fails with an error naming the provider, and no cleaning is started.
+
+### K10+ map
+
+The **Map** image entity is also created for K10+ (not K10+ Pro). It renders the map the robot uploads after mapping or cleaning: the occupancy grid, the rooms used for room cleaning, no-go zones and the dock. Rooms are filled in their own colours and labelled with their names, no-go zones are drawn in red, and walls and obstacles are dark. Unexplored space is transparent, so the image works on light and dark dashboards. Like the SwitchBot app, the image is rotated 180° from the robot's raw grid.
+
+The map is downloaded every 24 hours. It's also updated after the robot uploads a new map (per the status poll), and on `switchbot_vacuum.force_refresh`. The **Last map refresh** diagnostic sensor shows when Home Assistant last downloaded and rendered it; its `last_error` attribute explains a failed refresh.
+
+The attributes match the S10 map: `rooms` (name, pixel `outline` and label `x`/`y`), `charger`, `width`, `height` and `resolution`.
 
 ## Technical notes
 

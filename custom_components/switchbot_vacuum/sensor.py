@@ -90,6 +90,9 @@ async def async_setup_entry(
             for desc in CLEAN_SUMMARY_SENSORS
         )
 
+    if device_type == DEVICE_TYPE_K10:
+        entities.append(SwitchBotMapRefreshSensor(coordinator))
+
     async_add_entities(entities)
 
     known_room_ids: set[str] = set()
@@ -110,6 +113,30 @@ async def async_setup_entry(
 
     _async_add_new_rooms()
     entry.async_on_unload(coordinator.async_add_listener(_async_add_new_rooms))
+
+
+class SwitchBotMapRefreshSensor(CoordinatorEntity[SwitchBotS10Coordinator], SensorEntity):
+    """When Home Assistant last downloaded and rendered the K10+ map."""
+
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_has_entity_name = True
+    _attr_name = "Last map refresh"
+    _attr_icon = "mdi:map-clock"
+
+    def __init__(self, coordinator: SwitchBotS10Coordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.device_mac}_last_map_refresh"
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, coordinator.device_mac)})
+
+    @property
+    def native_value(self):
+        return self.coordinator.map_refreshed_at
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str | None]:
+        """Explain a stale refresh with the last failure (fixed messages only)."""
+        return {"last_error": self.coordinator.k10_last_error}
 
 
 class SwitchBotVacuumBattery(CoordinatorEntity[SwitchBotS10Coordinator], SensorEntity):

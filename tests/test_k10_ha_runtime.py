@@ -311,6 +311,7 @@ class K10EntityTests(unittest.IsolatedAsyncioTestCase):
         coordinator.hass = MagicMock()
         coordinator.wonderlab_endpoint = "https://wonderlabs.eu.api.switchbot.net"
         coordinator._last_room_refresh = time.time()
+        coordinator._k10_last_reported_map_package = None
         coordinator._rooms = {}
         coordinator.async_get_k10_status = AsyncMock(return_value={"WorkingStatus": 7})
         api = MagicMock()
@@ -325,6 +326,7 @@ class K10EntityTests(unittest.IsolatedAsyncioTestCase):
         coordinator.hass = MagicMock()
         coordinator.wonderlab_endpoint = "https://wonderlabs.eu.api.switchbot.net"
         coordinator._last_room_refresh = time.time()
+        coordinator._k10_last_reported_map_package = None
         coordinator._rooms = {}
         coordinator.async_get_k10_status = AsyncMock(return_value={"WorkingStatus": 7})
         coordinator._authorize_k10_api = AsyncMock(side_effect=TimeoutError())

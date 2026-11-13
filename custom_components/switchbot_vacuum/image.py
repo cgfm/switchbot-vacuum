@@ -1,4 +1,4 @@
-"""Authenticated S10 map image backed by the coordinator's executor cache."""
+"""Authenticated map image (S10 and K10+) backed by the coordinator's executor cache."""
 
 from __future__ import annotations
 
@@ -7,12 +7,12 @@ from homeassistant.core import callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DEVICE_TYPE_K10, DEVICE_TYPE_K10PRO, DOMAIN
+from .const import DEVICE_TYPE_K10PRO, DOMAIN
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    """Expose maps only for S10 devices."""
-    if entry.data.get("device_type") not in (DEVICE_TYPE_K10, DEVICE_TYPE_K10PRO):
+    """Expose maps for S10 and K10+; K10+ Pro has no map protocol yet."""
+    if entry.data.get("device_type") != DEVICE_TYPE_K10PRO:
         async_add_entities([SwitchBotMap(hass.data[DOMAIN][entry.entry_id])])
 
 
