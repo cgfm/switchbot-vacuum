@@ -379,7 +379,7 @@ SDK initialization, TLS loading, archive parsing and PNG generation run in execu
 
 HACS follows releases from **cgfm/switchbot-vacuum**. Upstream changes are not automatically installed or merged into this fork. Reviewed changes are published as explicit release tags. The focused upstream repair branches remain independent from the fork's map/route extensions.
 
-For the isolated test environment used for 0.5.0:
+For the isolated test environment used for 0.6.0:
 
 ```sh
 python -m venv .venv
