@@ -271,6 +271,52 @@ class K10Api:
             raise K10ProtocolError("Invalid K10+ property response")
         return properties
 
+    async def get_clean_track(
+        self, session: ClientSession, start: int = 0, max_points: int = 20000
+    ) -> tuple[list[Any], int]:
+        """Read the current or last cleaning track from point ``start``; read-only.
+
+        Returns (points, total): ``[x, y]`` points in millimetres, and the number
+        of points the robot reports for the whole track.
+        """
+        points: list[Any] = []
+        total = None
+        while len(points) < max_points:
+            result = await self.request(
+                session, "/v1/iot/device/invoke_service",
+                form={
+                    "product_key": self.product_key,
+                    "device_name": self.device_mac,
+                    "identifier": "GetCleanTrackWithPosIdx",
+                    "input": json.dumps(
+                        {"StartPosIndex": start + len(points)}, separators=(",", ":")
+                    ),
+                },
+            )
+            # Some kind of verbose type checking below since this is what we're trying
+            # to match against:
+            # {"code": 0, "data": {"result": {
+            #     "ErrorNO": 0,
+            #     "Track": {
+            #         "pathID": 12, "startPos": 0, "pointCounts": 3, "totalPoints": 1149,
+            #         "posArray": [[-4879, 160], [-4879, 260], [-4878, 360]]}}}}
+            if result.get("code") != 0:
+                raise K10ProtocolError(f"Cannot read cleaning track (code {result.get('code')})")
+            reply = (result.get("data") or {}).get("result")
+            reply = json.loads(reply) if isinstance(reply, str) else reply
+            track = reply.get("Track") if isinstance(reply, dict) else None
+            track = json.loads(track) if isinstance(track, str) else track
+            if not isinstance(track, dict):
+                raise K10ProtocolError("Invalid cleaning track response")
+            total = track.get("totalPoints")
+            page = track.get("posArray")
+            if not isinstance(page, list) or not page:
+                break
+            points.extend(page)
+            if not isinstance(total, int) or start + len(points) >= total:
+                break
+        return points, total if isinstance(total, int) else start + len(points)
+
     async def set_properties(self, session: ClientSession, items: dict[str, int]) -> None:
         """Set only caller-validated properties using the app's form encoding."""
         result = await self.request(

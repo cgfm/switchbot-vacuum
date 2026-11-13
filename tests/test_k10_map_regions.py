@@ -4,10 +4,13 @@ Synthetic maps only: no account, network or robot is used.
 """
 
 import base64
+import json
+import math
 import struct
 import sys
 import unittest
 import zlib
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -319,6 +322,14 @@ def fake_coordinator(**extra):
     coordinator._rooms = {}
     coordinator._last_room_refresh = 0
     coordinator._k10_last_reported_map_package = None
+    coordinator.update_interval = timedelta(seconds=30)
+    coordinator.path_updated_at = None
+    coordinator.k10_track_error = None
+    coordinator._k10_api = None
+    coordinator._k10_path = []
+    coordinator._k10_track_index = 0
+    coordinator._k10_track_loaded = False
+    coordinator._k10_overlay_drawn = None
     coordinator.data = {}
     for key, value in extra.items():
         setattr(coordinator, key, value)
@@ -422,6 +433,214 @@ class MapPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(entity.native_value)
         self.assertEqual(entity.extra_state_attributes,
                          {"last_error": "Map storage returned HTTP 403"})
+
+
+def track_reply(points, total, *, as_string=True):
+    track = {"pathID": 1, "pointCounts": len(points), "posArray": points,
+             "startPos": 0, "totalPoints": total}
+    outer = {"ErrorNO": 0, "Track": json.dumps(track) if as_string else track}
+    return {"code": 0, "data": {"result": json.dumps(outer)}}
+
+
+class TrackApiTests(unittest.IsolatedAsyncioTestCase):
+    def client(self):
+        client = api.K10Api("example-device", "example-product", "installation")
+        client.token, client.token_expiry = "delegated", 9999999999
+        return client
+
+    @staticmethod
+    def start_indexes(session):
+        return [json.loads(c[2]["data"]["input"])["StartPosIndex"] for c in session.calls]
+
+    async def test_pages_until_total(self):
+        session = Session([track_reply([[1, 2], [3, 4]], 3), track_reply([[5, 6]], 3)])
+        points, total = await self.client().get_clean_track(session)
+        self.assertEqual((points, total), ([[1, 2], [3, 4], [5, 6]], 3))
+        self.assertEqual(self.start_indexes(session), [0, 2])
+        self.assertEqual(session.calls[0][2]["data"]["identifier"], "GetCleanTrackWithPosIdx")
+
+    async def test_reads_only_new_points(self):
+        session = Session([track_reply([[5, 6]], 3, as_string=False)])
+        self.assertEqual(await self.client().get_clean_track(session, 2), ([[5, 6]], 3))
+        self.assertEqual(self.start_indexes(session), [2])
+
+    async def test_empty_or_restarted_track(self):
+        session = Session([track_reply([], 1)])
+        self.assertEqual(await self.client().get_clean_track(session, 5), ([], 1))
+
+    async def test_rejected_or_invalid_track(self):
+        for reply in ({"code": 1004}, {"code": 0, "data": {"result": "{}"}}):
+            with self.assertRaises(api.K10ProtocolError):
+                await self.client().get_clean_track(Session([reply]))
+
+
+class OverlayTests(unittest.TestCase):
+    def setUp(self):
+        self.rendered = k10_map.decode_k10_map(k10_map_record())
+
+    def test_without_path_or_robot_the_image_is_unchanged(self):
+        overlay = k10_map.render_k10_overlay(self.rendered, None, [])
+        self.assertEqual(rgba_rows(overlay["image"]), rgba_rows(self.rendered["image"]))
+        self.assertEqual((overlay["pixel"], overlay["segments"]), (None, 0))
+
+    def test_path_is_drawn_and_jumps_are_skipped(self):
+        path = [tuple(mm(8, 10)), tuple(mm(12, 10)), tuple(mm(30, 20))]  # Last step > 1 m.
+        overlay = k10_map.render_k10_overlay(self.rendered, None, path)
+        self.assertEqual(overlay["segments"], 1)
+        self.assertTrue(pixels_of(overlay["image"], (*k10_map.C_PATH, 255)))
+
+    def test_robot_is_drawn_at_its_position(self):
+        pose = (*mm(10, 10), None)
+        overlay = k10_map.render_k10_overlay(self.rendered, pose, [])
+        self.assertEqual(pixel(overlay["image"], overlay["pixel"]["x"], overlay["pixel"]["y"]),
+                         (*k10_map.C_ROBOT, 255))
+        self.assertFalse(pixels_of(overlay["image"], (*k10_map.C_HEADING, 255)))
+
+    def heading_direction(self, heading):
+        """Mean offset of the heading line's pixels from the robot's centre."""
+        overlay = k10_map.render_k10_overlay(self.rendered, (*mm(15, 15), heading), [])
+        line = pixels_of(overlay["image"], (*k10_map.C_HEADING, 255))
+        self.assertTrue(line, heading)
+        cx, cy = overlay["pixel"]["x"], overlay["pixel"]["y"]
+        return (sum(x for x, _ in line) / len(line) - cx, sum(y for _, y in line) / len(line) - cy)
+
+    def test_heading_follows_the_rotated_map(self):
+        # Milliradians counter-clockwise from +x; the map is rotated 180°, so robot
+        # +x is drawn to the left and robot +y downwards.
+        for heading, (want_x, want_y) in ((0, (-1, 0)), (1571, (0, 1)),
+                                          (3142, (1, 0)), (-1571, (0, -1))):
+            dx, dy = self.heading_direction(heading)
+            norm = math.hypot(dx, dy)
+            self.assertGreater((dx * want_x + dy * want_y) / norm, 0.95, heading)
+
+    def test_robot_off_the_map_is_not_drawn(self):
+        overlay = k10_map.render_k10_overlay(self.rendered, (10**7, 10**7, 0), [])
+        self.assertIsNone(overlay["pixel"])
+
+    def test_parse_pose(self):
+        self.assertEqual(k10_map.parse_pose("[100, -200, 45]"), (100.0, -200.0, 45))
+        self.assertEqual(k10_map.parse_pose("[100, -200]"), (100.0, -200.0, None))
+        for bad in (None, "", "not json", "[1]", "{}", '["a", "b"]'):
+            self.assertIsNone(k10_map.parse_pose(bad), bad)
+
+
+class PathCoordinatorTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        patcher = patch.object(coordinator_module, "async_get_clientsession",
+                               return_value=MagicMock())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def coordinator(self, **extra):
+        coordinator = fake_coordinator(map_data=k10_map.decode_k10_map(k10_map_record()), **extra)
+        coordinator._k10_api = MagicMock(get_clean_track=AsyncMock())
+        return coordinator
+
+    async def test_whole_track_once_then_new_points_then_restart(self):
+        coordinator = self.coordinator()
+        track = coordinator._k10_api.get_clean_track
+        a, b, c = mm(8, 10), mm(9, 10), mm(10, 10)
+        track.return_value = ([a, b], 2)
+        await coordinator._async_update_k10_track(7)  # Docked: read the whole last track.
+        self.assertEqual(coordinator._k10_path, [tuple(a), tuple(b)])
+        first_update = coordinator.path_updated_at
+        self.assertIsNotNone(first_update)
+        await coordinator._async_update_k10_track(7)  # Still docked: nothing new to read.
+        self.assertEqual(track.await_count, 1)
+        track.return_value = ([c], 3)
+        await coordinator._async_update_k10_track(1)  # Cleaning: only new points.
+        self.assertEqual(track.await_args.args[1], 2)
+        self.assertEqual(len(coordinator._k10_path), 3)
+        track.side_effect = [([], 1), ([a], 1)]
+        await coordinator._async_update_k10_track(1)  # A new task restarted the track.
+        self.assertEqual(coordinator._k10_path, [tuple(a)])
+        self.assertEqual(coordinator._k10_track_index, 1)
+
+    async def test_unchanged_track_keeps_its_timestamp(self):
+        coordinator = self.coordinator()
+        coordinator._k10_api.get_clean_track = AsyncMock(return_value=([mm(8, 10)], 1))
+        await coordinator._async_update_k10_track(1)
+        first_update = coordinator.path_updated_at
+        coordinator._k10_api.get_clean_track.return_value = ([], 1)
+        await coordinator._async_update_k10_track(1)
+        self.assertEqual(coordinator.path_updated_at, first_update)
+
+    async def test_track_errors(self):
+        coordinator = self.coordinator()
+        track = coordinator._k10_api.get_clean_track
+        track.side_effect = TimeoutError("https://signed.example/?Signature=secret")
+        await coordinator._async_update_k10_track(7)
+        self.assertFalse(coordinator._k10_track_loaded)  # Network errors retry next poll.
+        self.assertEqual(coordinator.k10_track_error, "TimeoutError")
+        track.side_effect = api.K10ProtocolError("Cannot read cleaning track (code 1004)")
+        await coordinator._async_update_k10_track(7)
+        await coordinator._async_update_k10_track(7)
+        self.assertEqual(track.await_count, 2)  # Rejections don't retry every idle poll.
+        self.assertEqual(coordinator.k10_track_error, "Cannot read cleaning track (code 1004)")
+        track.side_effect, track.return_value = None, ([mm(8, 10)], 1)
+        await coordinator._async_update_k10_track(1)  # A task retries; success clears it.
+        self.assertIsNone(coordinator.k10_track_error)
+
+    async def test_overlay_is_redrawn_only_on_change(self):
+        coordinator = self.coordinator()
+        pose = (*mm(12, 12), 45)
+        await coordinator._async_update_k10_overlay(pose)
+        attrs = coordinator.map_data["attributes"]
+        self.assertTrue(attrs["robot_position_available"])
+        self.assertEqual({k: attrs["robot_position"][k] for k in ("kind", "x", "y", "heading")},
+                         {"kind": "reported", "x": pose[0], "y": pose[1], "heading": 45})
+        self.assertFalse(attrs["route_available"])
+        renders = coordinator.hass.async_add_executor_job.await_count
+        await coordinator._async_update_k10_overlay(pose)
+        self.assertEqual(coordinator.hass.async_add_executor_job.await_count, renders)
+        coordinator._k10_path = [tuple(mm(8, 10)), tuple(mm(9, 10))]
+        await coordinator._async_update_k10_overlay(pose)
+        self.assertTrue(coordinator.map_data["attributes"]["route_available"])
+        self.assertEqual(coordinator.map_data["attributes"]["route_points"], 2)
+        self.assertIn("_frame", coordinator.map_data)  # Later redraws still have the base.
+
+    async def test_map_refresh_rereads_track_and_redraws(self):
+        coordinator = self.coordinator(_k10_track_loaded=True, _k10_overlay_drawn=(None, 0))
+        client = MagicMock()
+        client.get_map = AsyncMock(return_value=(k10_map_record(), {"MapID": 101}))
+        coordinator._authorize_k10_api = AsyncMock(return_value=client)
+        await coordinator.async_refresh_k10_rooms()
+        self.assertFalse(coordinator._k10_track_loaded)
+        self.assertIsNone(coordinator._k10_overlay_drawn)
+
+    async def test_polls_faster_while_moving(self):
+        coordinator = self.coordinator(_last_room_refresh=10**12)
+        client = MagicMock()
+        client.get_properties = AsyncMock(return_value={"CurrentLocation": "[0, 0, 0]"})
+        client.get_clean_track = AsyncMock(return_value=([], 0))
+        coordinator._k10_api = client
+        coordinator._authorize_k10_api = AsyncMock(return_value=client)
+        for status, seconds in ((1, 15), (4, 30), (5, 15), (7, 30)):
+            coordinator.async_get_k10_status = AsyncMock(return_value={"WorkingStatus": status})
+            await coordinator._async_update_data_k10()
+            self.assertEqual(coordinator.update_interval, timedelta(seconds=seconds), status)
+
+
+class PathSensorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_path_update_sensor_only_for_k10(self):
+        for device_type, expected in ((DEVICE_TYPE_K10, 1), (DEVICE_TYPE_S10, 0)):
+            coordinator = MagicMock(device_mac="FAKEDEVICE", rooms={})
+            coordinator.data = {"rooms": {}}
+            entry = MagicMock(entry_id="e", data={"device_type": device_type})
+            hass = MagicMock()
+            hass.data = {DOMAIN: {"e": coordinator}}
+            added = []
+            await sensor.async_setup_entry(hass, entry, added.extend)
+            found = [e for e in added if isinstance(e, sensor.SwitchBotPathUpdateSensor)]
+            self.assertEqual(len(found), expected, device_type)
+
+    def test_path_update_sensor_reports_time(self):
+        coordinator = MagicMock(device_mac="FAKEDEVICE", path_updated_at="then",
+                                k10_track_error="TimeoutError")
+        entity = sensor.SwitchBotPathUpdateSensor(coordinator)
+        self.assertEqual(entity.unique_id, "FAKEDEVICE_last_path_update")
+        self.assertEqual(entity.native_value, "then")
+        self.assertEqual(entity.extra_state_attributes, {"last_error": "TimeoutError"})
 
 
 if __name__ == "__main__":

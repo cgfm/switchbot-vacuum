@@ -6,6 +6,10 @@ metres. Rooms (``smartArea.value[].vertexs``), no-go zones (``area[].vertexs``)
 and the dock (``chargeHandlePos``) are in millimetres. The SwitchBot app shows
 the map rotated 180° from the raw grid; this renderer does the same.
 
+The cleaning path (``GetCleanTrackWithPosIdx``) and robot position
+(``CurrentLocation``) are also in millimetres. They are drawn over a cached copy
+of the rendered map, so the grid is decoded only when a new map arrives.
+
 Pure standard library apart from optional Pillow labels (a Home Assistant core
 dependency).
 """
@@ -13,6 +17,7 @@ dependency).
 from __future__ import annotations
 
 import base64
+import json
 import math
 import struct
 import zlib
@@ -33,7 +38,12 @@ C_WALL = (66, 60, 100, 255)  # Walls and obstacles.
 C_UNKNOWN = (0, 0, 0, 0)  # Unexplored: transparent.
 C_NOGO = (224, 74, 74)
 C_DOCK = (30, 120, 210)
+C_ROBOT = (235, 126, 24)
+C_HEADING = (120, 54, 5)
+C_PATH = (255, 255, 255)
 C_LABEL_BG = (44, 46, 62, 165)
+# Track points further apart than this are a relocalisation jump, not a path.
+MAX_PATH_STEP_MM = 1000
 # Saturated, app-like room colours; red is left for no-go zones.
 ROOM_COLORS = (
     (126, 186, 240),
@@ -339,10 +349,15 @@ def decode_k10_map(map_data: dict[str, Any]) -> dict[str, Any]:
             _disc(pixel_rows, image_w, image_h, px, py, max(5, scale * 2), C_DOCK, (255, 255, 255))
             charger = {"x": round(px, 1), "y": round(py, 1)}
 
+    # The path and robot are drawn between these pixels and the labels.
+    base_rows = [bytes(row) for row in pixel_rows]
     return {
         "image": _png_rgba(
             image_w, image_h, _draw_labels(pixel_rows, image_w, image_h, labels, scale)
         ),
+        "_base_rows": base_rows,
+        "_frame": frame,
+        "_labels": labels,
         "attributes": {
             "map_id": str(map_data.get("mapId", "")),
             "rooms": geometry,
@@ -355,3 +370,67 @@ def decode_k10_map(map_data: dict[str, Any]) -> dict[str, Any]:
             "source": "SwitchBot K10+ cloud map",
         },
     }
+
+
+def parse_pose(value: Any) -> tuple[float, float, float | None] | None:
+    """Parse ``CurrentLocation``, a JSON ``[x, y, heading]`` string, into a pose.
+
+    The heading is in milliradians (±π), counter-clockwise from the robot's +x
+    axis; it was matched against the direction of travel on a K10+.
+    """
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    point = _points([value])
+    if not point:
+        return None
+    heading = value[2] if len(value) >= 3 and isinstance(value[2], (int, float)) else None
+    return (*point[0], heading)
+
+
+def parse_track(points: Any) -> list[tuple[float, float]]:
+    """Parse ``posArray`` track points (``[[x, y], ...]``)."""
+    return _points(points)
+
+
+def render_k10_overlay(
+    map_data: dict[str, Any],
+    pose: tuple[float, float, float | None] | None,
+    path: list[tuple[float, float]],
+) -> dict[str, Any]:
+    """Draw the cleaning path, room labels and robot over the cached map pixels."""
+    frame: _Frame = map_data["_frame"]
+    width, height = frame.image_w, frame.image_h
+    rows = [bytearray(row) for row in map_data["_base_rows"]]
+    segments = [
+        (frame.pixel(*a), frame.pixel(*b))
+        for a, b in zip(path, path[1:])
+        if math.dist(a, b) <= MAX_PATH_STEP_MM
+    ]
+    _stroke(rows, width, height, segments, C_PATH, max(0.5, frame.scale / 4))
+    rows = _draw_labels(rows, width, height, map_data["_labels"], frame.scale)
+    pixel = None
+    if pose is not None:
+        x, y = frame.pixel(pose[0], pose[1])
+        if 0 <= x < width and 0 <= y < height:
+            radius = max(6, frame.scale * 2.5)
+            _disc(rows, width, height, x, y, radius, C_ROBOT, (255, 255, 255))
+            if pose[2] is not None:
+                _draw_heading(rows, frame, pose, radius)
+            pixel = {"x": round(x, 1), "y": round(y, 1)}
+    return {"image": _png_rgba(width, height, rows), "pixel": pixel, "segments": len(segments)}
+
+
+def _draw_heading(rows, frame: _Frame, pose: tuple[float, float, float], radius: float) -> None:
+    """Draw a line from the robot's centre in the direction it faces."""
+    angle = pose[2] / 1000  # Milliradians, counter-clockwise from +x.
+    x, y = frame.pixel(pose[0], pose[1])
+    # Map a point ahead of the robot, so the frame applies the map's rotation.
+    ahead_x, ahead_y = frame.pixel(
+        pose[0] + math.cos(angle) * MM_PER_M, pose[1] + math.sin(angle) * MM_PER_M
+    )
+    length = math.hypot(ahead_x - x, ahead_y - y)
+    tip = (x + (ahead_x - x) / length * radius * 1.6, y + (ahead_y - y) / length * radius * 1.6)
+    _stroke(rows, frame.image_w, frame.image_h, [((x, y), tip)], C_HEADING, max(1, frame.scale / 3))

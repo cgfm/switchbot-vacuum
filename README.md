@@ -38,6 +38,8 @@ Available features depend on the vacuum model and region.
 | Room command passes and order | Supported | One or two passes; optional room order |
 | Automatic map refresh every 24 hours | Supported | Supported, plus after the robot uploads a new map |
 | Map image with rooms and dock | Supported | Supported (see [K10+ map](#k10-map)) |
+| Robot position on the map | Last received pose during tasks | Reported position, redrawn when it changes |
+| Cleaning path on the map | Latest completed task | Current or last task, followed while cleaning |
 | Multiple vacuums on one account | Supported | Supported |
 | `force_refresh` for status and rooms | Supported | Supported |
 
@@ -344,11 +346,13 @@ The **Map** image entity is also created for K10+ (not K10+ Pro). It renders the
 
 The map is downloaded every 24 hours. It's also updated after the robot uploads a new map (per the status poll), and on `switchbot_vacuum.force_refresh`. The **Last map refresh** diagnostic sensor shows when Home Assistant last downloaded and rendered it; its `last_error` attribute explains a failed refresh.
 
-The attributes match the S10 map: `rooms` (name, pixel `outline` and label `x`/`y`), `charger`, `width`, `height` and `resolution`.
+The robot's position, heading, and most recent cleaning path (or current in-progress cleaning) are drawn on top of the map. If the robot is active (cleaning or returning to the dock), then it's updated every 15 seconds. Otherwise it's only updated when the map is updated. There's a diagnostic sensor (Last path update) showing the last time the path was updated.
+
+The attributes follow the S10 map: `rooms` (name, pixel `outline` and label `x`/`y`), `charger`, `width`, `height`, `resolution`, `robot_position` (`x`/`y` in robot millimetres, `heading` in milliradians counter-clockwise from the robot's x axis, and `pixel`) and `route_available`, plus `route_points` (the number of path points). The robot reverses onto its dock, so near the dock the marker faces away from the end of the path.
 
 ## Technical notes
 
-- The integration polls the device every 30 seconds
+- The integration polls the device every 30 seconds (every 15 seconds while a K10+ is cleaning or returning to the dock)
 - Auth tokens are refreshed automatically every 1.5 hours
 - Room names are refreshed from the cloud map every 24 hours (or on demand via `force_refresh`); room refresh runs as a background task so it never blocks setup
 - For S10, error codes are read from device property 1019 and mapped to descriptive strings; unknown codes are logged as warnings so they can be reported and added

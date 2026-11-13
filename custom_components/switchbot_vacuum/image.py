@@ -22,7 +22,7 @@ class SwitchBotMap(CoordinatorEntity, ImageEntity):
     _attr_content_type = "image/png"
     _attr_name = "Map"
     _attr_icon = "mdi:map"
-    _unrecorded_attributes = frozenset({"rooms", "charger"})
+    _unrecorded_attributes = frozenset({"rooms", "charger", "robot_position"})
 
     def __init__(self, coordinator):
         CoordinatorEntity.__init__(self, coordinator)

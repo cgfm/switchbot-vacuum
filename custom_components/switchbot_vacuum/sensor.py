@@ -91,7 +91,7 @@ async def async_setup_entry(
         )
 
     if device_type == DEVICE_TYPE_K10:
-        entities.append(SwitchBotMapRefreshSensor(coordinator))
+        entities += [SwitchBotMapRefreshSensor(coordinator), SwitchBotPathUpdateSensor(coordinator)]
 
     async_add_entities(entities)
 
@@ -115,19 +115,26 @@ async def async_setup_entry(
     entry.async_on_unload(coordinator.async_add_listener(_async_add_new_rooms))
 
 
-class SwitchBotMapRefreshSensor(CoordinatorEntity[SwitchBotS10Coordinator], SensorEntity):
-    """When Home Assistant last downloaded and rendered the K10+ map."""
+class SwitchBotK10TimestampSensor(CoordinatorEntity[SwitchBotS10Coordinator], SensorEntity):
+    """A K10+ map diagnostic timestamp."""
 
     _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_has_entity_name = True
-    _attr_name = "Last map refresh"
-    _attr_icon = "mdi:map-clock"
+    _key: str
 
     def __init__(self, coordinator: SwitchBotS10Coordinator) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.device_mac}_last_map_refresh"
+        self._attr_unique_id = f"{coordinator.device_mac}_{self._key}"
         self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, coordinator.device_mac)})
+
+
+class SwitchBotMapRefreshSensor(SwitchBotK10TimestampSensor):
+    """When Home Assistant last downloaded and rendered the K10+ map."""
+
+    _key = "last_map_refresh"
+    _attr_name = "Last map refresh"
+    _attr_icon = "mdi:map-clock"
 
     @property
     def native_value(self):
@@ -137,6 +144,23 @@ class SwitchBotMapRefreshSensor(CoordinatorEntity[SwitchBotS10Coordinator], Sens
     def extra_state_attributes(self) -> dict[str, str | None]:
         """Explain a stale refresh with the last failure (fixed messages only)."""
         return {"last_error": self.coordinator.k10_last_error}
+
+
+class SwitchBotPathUpdateSensor(SwitchBotK10TimestampSensor):
+    """When new K10+ cleaning-path points last arrived."""
+
+    _key = "last_path_update"
+    _attr_name = "Last path update"
+    _attr_icon = "mdi:map-marker-path"
+
+    @property
+    def native_value(self):
+        return self.coordinator.path_updated_at
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str | None]:
+        """Tell a failing track read apart from a path with nothing new."""
+        return {"last_error": self.coordinator.k10_track_error}
 
 
 class SwitchBotVacuumBattery(CoordinatorEntity[SwitchBotS10Coordinator], SensorEntity):
