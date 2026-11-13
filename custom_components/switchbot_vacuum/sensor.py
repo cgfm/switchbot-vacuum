@@ -11,7 +11,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, UnitOfTime
+from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfTime
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -134,7 +134,15 @@ class SwitchBotVacuumBattery(CoordinatorEntity[SwitchBotS10Coordinator], SensorE
 
 
 class SwitchBotRoomSensor(CoordinatorEntity[SwitchBotS10Coordinator], SensorEntity):
-    """Sensor representing a room known to the vacuum."""
+    """Sensor representing a room known to the vacuum.
+
+    Hidden by default: rooms are exposed as vacuum segments for area cleaning,
+    in the vacuum's ``rooms`` attribute and on the map. Enable a sensor to use
+    its ``room_id`` attribute in templates.
+    """
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
 
     def __init__(
         self,

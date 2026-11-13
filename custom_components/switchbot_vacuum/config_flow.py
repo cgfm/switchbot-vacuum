@@ -34,6 +34,7 @@ class SwitchBotS10ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for SwitchBot Vacuum."""
 
     VERSION = 1
+    MINOR_VERSION = 2
 
     def __init__(self) -> None:
         """Initialize."""

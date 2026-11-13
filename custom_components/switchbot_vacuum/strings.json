@@ -40,5 +40,18 @@
     "abort": {
       "unique_id_mismatch": "The authenticated device does not match the existing vacuum."
     }
+  },
+  "issues": {
+    "hide_room_sensors": {
+      "title": "Hide room sensors for {name}",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Hide room sensors for {name}",
+            "description": "Rooms are now available for area cleaning and in the vacuum's `rooms` attribute, so room sensors are hidden by default. You have {count} existing visible room sensors. Submit to disable them, or ignore to leave them alone. You can re-enable any of them from the device page."
+          }
+        }
+      }
+    }
   }
 }

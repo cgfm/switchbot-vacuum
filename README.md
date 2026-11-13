@@ -164,7 +164,7 @@ Both entities expose `error_code` (raw integer) and `error_type`/`error_descript
 
 ### Room sensors
 
-Each room discovered from the vacuum's map gets a sensor entity (e.g. `sensor.kitchen`, `sensor.bedroom`). The sensor value is the room name, and the `room_id` attribute contains the internal ID (S10: e.g. `ROOM_013`; K10+: e.g. `room1`).
+Each room discovered from the vacuum's map gets a sensor entity (e.g. `sensor.kitchen`, `sensor.bedroom`). These are diagnostic entities (disabled by default), because rooms are already available for area cleaning, in the vacuum's `rooms` attribute and on the map. Non-diagnostic room sensors created by earlier versions are converted to (enabled) diagnostic entities when upgrading. After upgrading, a Repair prompt is created to disable/hide them (you can ignore it to keep them.) The sensor value is the room name, and the `room_id` attribute contains the internal ID (S10: e.g. `ROOM_013`; K10+: e.g. `room1`).
 
 ```yaml
 # Get room ID for use in clean_rooms service
@@ -172,6 +172,22 @@ Each room discovered from the vacuum's map gets a sensor entity (e.g. `sensor.ki
 ```
 
 ## Services
+
+### `vacuum.clean_area` (Home Assistant areas)
+
+The vacuum entity reports its rooms as cleanable segments (S10 and K10+; not K10+ Pro). In the vacuum entity's settings, [map each room](https://www.home-assistant.io/integrations/vacuum/#mapping-your-vacuum-areas-to-home-assistant-areas) to one of your Home Assistant areas. Then use the built-in action, voice assistants, or the standard vacuum UI:
+
+```yaml
+action: vacuum.clean_area
+target:
+  entity_id: vacuum.switchbot_vacuum
+data:
+  cleaning_area_id:
+    - kitchen
+    - dining_room
+```
+
+Rooms are cleaned in the order given, with each room's settings from the SwitchBot app. If rooms are later added or removed in the app, a Repair issue asks you to update the mapping. Renaming a room keeps its mapping. Use `switchbot_vacuum.clean_rooms` below when you need per-run mode, suction or pass overrides.
 
 ### `switchbot_vacuum.clean_rooms`
 

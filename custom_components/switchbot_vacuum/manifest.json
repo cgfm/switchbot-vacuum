@@ -12,5 +12,5 @@
   "requirements": [
     "aiobotocore>=2.9.0"
   ],
-  "dependencies": []
+  "dependencies": ["repairs"]
 }
