@@ -263,6 +263,17 @@ class AsyncProtocolTests(unittest.IsolatedAsyncioTestCase):
         ):
             await client.clean_rooms(session, ["Entry"])
 
+    async def test_stale_map_rejected_before_changing_robot_or_uploading(self):
+        client = api.K10Api("example-device", "example-product", "installation")
+        data = map_data(map_id=102, rooms=[room(room_id=1, name="Office")])
+        client.get_map = AsyncMock(return_value=(data, {"MapID": "102"}))
+        client.get_properties = AsyncMock()
+        session = Session([])
+        with self.assertRaisesRegex(api.K10ProtocolError, "update the Home Assistant area mapping"):
+            await client.clean_rooms(session, ["room1"], expected_map_id="101")
+        client.get_properties.assert_not_awaited()
+        self.assertEqual(session.calls, [])
+
     async def test_unknown_room_never_uploads_or_starts(self):
         data = map_data(rooms=[room(room_id=1, name="Entry")])
         client = api.K10Api("example-device", "example-product", "installation")

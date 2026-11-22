@@ -9,6 +9,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from homeassistant.components.vacuum import Segment, VacuumEntityFeature
+from homeassistant.components.vacuum.services import _async_clean_area
+from homeassistant.core import ServiceCall
+from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.switchbot_vacuum import vacuum
 from custom_components.switchbot_vacuum.const import (
@@ -23,6 +26,7 @@ def coordinator(device_type=DEVICE_TYPE_K10, rooms=None):
     c.entry.data = {"device_type": device_type}
     c.device_mac = "FAKEDEVICE"
     c.device_name = "Robovac"
+    c.k10_room_map_id = "101"
     c.rooms = {"room1": "Kitchen", "room2": "Den"} if rooms is None else rooms
     c.data = {"firmware": "", "work_status": 7, "rooms": c.rooms}
     c.async_clean_k10_rooms = AsyncMock()
@@ -50,19 +54,47 @@ class SegmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_segments_are_rooms(self):
         entity = vacuum.SwitchBotS10Vacuum(coordinator())
         self.assertEqual(await entity.async_get_segments(),
-                         [Segment(id="room2", name="Den"), Segment(id="room1", name="Kitchen")])
+                         [Segment(id="101:room2", name="Den"), Segment(id="101:room1", name="Kitchen")])
 
     async def test_clean_segments_uses_k10_room_protocol_in_order(self):
         c = coordinator()
         entity = vacuum.SwitchBotS10Vacuum(c)
-        entity.async_write_ha_state = MagicMock()
-        await entity.async_clean_segments(["room2", "room1"])
-        c.async_clean_k10_rooms.assert_awaited_once_with(["room2", "room1"], 1, True, None, None)
+        entity.entity_id = "vacuum.robovac"
+        entity.registry_entry = SimpleNamespace(options={"vacuum": {"area_mapping": {
+            "den": ["101:room2"], "kitchen": ["101:room1"],
+        }}})
+        call = ServiceCall(MagicMock(), "vacuum", "clean_area", {
+            "cleaning_area_id": ["den", "kitchen"],
+        })
+        await _async_clean_area([entity], call)
+        c.async_clean_k10_rooms.assert_awaited_once_with(
+            ["room2", "room1"], 1, True, None, None, expected_map_id="101"
+        )
+
+    async def test_clean_segments_rejects_old_map_or_unscoped_ids(self):
+        c = coordinator()
+        entity = vacuum.SwitchBotS10Vacuum(c)
+        for segment_ids in (["100:room1"], ["room1"], ["101:room1", "101:room3"]):
+            with self.subTest(segment_ids=segment_ids):
+                with self.assertRaisesRegex(HomeAssistantError, "update the Home Assistant area mapping"):
+                    await entity.async_clean_segments(segment_ids)
+        c.async_clean_k10_rooms.assert_not_awaited()
+
+    async def test_cached_rooms_without_map_id_are_not_segments(self):
+        c = coordinator()
+        c.k10_room_map_id = None
+        entity = vacuum.SwitchBotS10Vacuum(c)
+        self.assertEqual(await entity.async_get_segments(), [])
 
     async def test_clean_segments_uses_s10_room_ids(self):
         c = coordinator(DEVICE_TYPE_S10, {"ROOM_001": "Kitchen"})
         entity = vacuum.SwitchBotS10Vacuum(c)
-        await entity.async_clean_segments(["ROOM_001"])
+        entity.entity_id = "vacuum.robovac"
+        entity.registry_entry = SimpleNamespace(options={"vacuum": {"area_mapping": {
+            "kitchen": ["ROOM_001"],
+        }}})
+        call = ServiceCall(MagicMock(), "vacuum", "clean_area", {"cleaning_area_id": ["kitchen"]})
+        await _async_clean_area([entity], call)
         payload = c.async_send_command.await_args.args[1]
         self.assertEqual(payload["0"], "clean_rooms")
         self.assertEqual([r["room_id"] for r in payload["1"]["rooms"]], ["ROOM_001"])
@@ -82,26 +114,40 @@ class RoomChangeTests(unittest.TestCase):
 
     def test_no_issue_when_rooms_match(self):
         entity = self.entity()
-        mapped(entity, ["room1", "room2"])
+        mapped(entity, ["101:room1", "101:room2"])
         entity._async_check_room_changes()
         entity.async_create_segments_issue.assert_not_called()
 
     def test_issue_once_when_rooms_change(self):
         entity = self.entity({"room1": "Kitchen", "room3": "Office"})
-        mapped(entity, ["room1", "room2"])
+        mapped(entity, ["101:room1", "101:room2"])
         entity._async_check_room_changes()
+        entity._async_check_room_changes()
+        entity.async_create_segments_issue.assert_called_once()
+
+    def test_issue_when_new_map_reuses_room_ids(self):
+        entity = self.entity()
+        mapped(entity, ["101:room1", "101:room2"])
+        entity.coordinator.k10_room_map_id = "102"
+        entity._async_check_room_changes()
+        entity.async_create_segments_issue.assert_called_once()
+
+    def test_issue_when_current_map_has_no_rooms(self):
+        entity = self.entity({})
+        mapped(entity, ["101:room1"])
         entity._async_check_room_changes()
         entity.async_create_segments_issue.assert_called_once()
 
     def test_no_issue_while_rooms_unknown(self):
         entity = self.entity({})
-        mapped(entity, ["room1"])
+        entity.coordinator.k10_room_map_id = None
+        mapped(entity, ["101:room1"])
         entity._async_check_room_changes()
         entity.async_create_segments_issue.assert_not_called()
 
     def test_renamed_room_keeps_mapping(self):
         entity = self.entity({"room1": "Galley", "room2": "Den"})
-        mapped(entity, ["room1", "room2"])
+        mapped(entity, ["101:room1", "101:room2"])
         entity._async_check_room_changes()
         entity.async_create_segments_issue.assert_not_called()
 

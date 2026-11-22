@@ -63,7 +63,7 @@ class K10EntityTests(unittest.IsolatedAsyncioTestCase):
         entity = vacuum.SwitchBotS10Vacuum(coordinator)
         await entity.async_clean_rooms(["Entry", "Bedroom"], times=2, force_order=False)
         coordinator.async_clean_k10_rooms.assert_awaited_once_with(
-            ["Entry", "Bedroom"], 2, False, None, None
+            ["Entry", "Bedroom"], 2, False, None, None, expected_map_id=None
         )
 
     async def test_k10_action_cannot_start_a_whole_house_clean(self):
@@ -203,7 +203,7 @@ class K10EntityTests(unittest.IsolatedAsyncioTestCase):
         entity = vacuum.SwitchBotS10Vacuum(coordinator)
         await entity.async_clean_rooms(["Entry"], mode="mop", fan_level=2, times=2)
         coordinator.async_clean_k10_rooms.assert_awaited_once_with(
-            ["Entry"], 2, True, "mop", 2
+            ["Entry"], 2, True, "mop", 2, expected_map_id=None
         )
 
     async def test_standard_fan_action_routes_all_four_k10_levels(self):

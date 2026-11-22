@@ -327,6 +327,8 @@ def fake_coordinator(**extra):
     coordinator.k10_track_error = None
     coordinator._k10_api = None
     coordinator._k10_path = []
+    coordinator.k10_room_map_id = None
+    coordinator._k10_track_id = None
     coordinator._k10_track_index = 0
     coordinator._k10_track_loaded = False
     coordinator._k10_overlay_drawn = None
@@ -353,6 +355,7 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         coordinator._authorize_k10_api = AsyncMock(return_value=self.client(k10_map_record()))
         await coordinator.async_refresh_k10_rooms()
         self.assertEqual(coordinator.rooms, {"room1": "Kitchen", "room2": "Den"})
+        self.assertEqual(coordinator.k10_room_map_id, "101")
         self.assertEqual(coordinator.map_data["attributes"]["source"], "SwitchBot K10+ cloud map")
         self.assertIsNotNone(coordinator.map_refreshed_at)
         self.assertEqual(coordinator.map_updated, coordinator.map_refreshed_at)
@@ -435,8 +438,8 @@ class MapPlatformTests(unittest.IsolatedAsyncioTestCase):
                          {"last_error": "Map storage returned HTTP 403"})
 
 
-def track_reply(points, total, *, as_string=True):
-    track = {"pathID": 1, "pointCounts": len(points), "posArray": points,
+def track_reply(points, total, *, as_string=True, path_id=1):
+    track = {"pathID": path_id, "pointCounts": len(points), "posArray": points,
              "startPos": 0, "totalPoints": total}
     outer = {"ErrorNO": 0, "Track": json.dumps(track) if as_string else track}
     return {"code": 0, "data": {"result": json.dumps(outer)}}
@@ -454,19 +457,24 @@ class TrackApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_pages_until_total(self):
         session = Session([track_reply([[1, 2], [3, 4]], 3), track_reply([[5, 6]], 3)])
-        points, total = await self.client().get_clean_track(session)
-        self.assertEqual((points, total), ([[1, 2], [3, 4], [5, 6]], 3))
+        points, total, path_id = await self.client().get_clean_track(session)
+        self.assertEqual((points, total, path_id), ([[1, 2], [3, 4], [5, 6]], 3, "1"))
         self.assertEqual(self.start_indexes(session), [0, 2])
         self.assertEqual(session.calls[0][2]["data"]["identifier"], "GetCleanTrackWithPosIdx")
 
     async def test_reads_only_new_points(self):
         session = Session([track_reply([[5, 6]], 3, as_string=False)])
-        self.assertEqual(await self.client().get_clean_track(session, 2), ([[5, 6]], 3))
+        self.assertEqual(await self.client().get_clean_track(session, 2), ([[5, 6]], 3, "1"))
         self.assertEqual(self.start_indexes(session), [2])
 
     async def test_empty_or_restarted_track(self):
         session = Session([track_reply([], 1)])
-        self.assertEqual(await self.client().get_clean_track(session, 5), ([], 1))
+        self.assertEqual(await self.client().get_clean_track(session, 5), ([], 1, "1"))
+
+    async def test_pages_from_two_different_paths_are_not_joined(self):
+        session = Session([track_reply([[1, 2]], 2), track_reply([[3, 4]], 2, path_id=2)])
+        with self.assertRaisesRegex(api.K10ProtocolError, "Cleaning track changed"):
+            await self.client().get_clean_track(session)
 
     async def test_rejected_or_invalid_track(self):
         for reply in ({"code": 1004}, {"code": 0, "data": {"result": "{}"}}):
@@ -540,28 +548,47 @@ class PathCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         coordinator = self.coordinator()
         track = coordinator._k10_api.get_clean_track
         a, b, c = mm(8, 10), mm(9, 10), mm(10, 10)
-        track.return_value = ([a, b], 2)
+        track.return_value = ([a, b], 2, "1")
         await coordinator._async_update_k10_track(7)  # Docked: read the whole last track.
         self.assertEqual(coordinator._k10_path, [tuple(a), tuple(b)])
         first_update = coordinator.path_updated_at
         self.assertIsNotNone(first_update)
         await coordinator._async_update_k10_track(7)  # Still docked: nothing new to read.
         self.assertEqual(track.await_count, 1)
-        track.return_value = ([c], 3)
+        track.return_value = ([c], 3, "1")
         await coordinator._async_update_k10_track(1)  # Cleaning: only new points.
         self.assertEqual(track.await_args.args[1], 2)
         self.assertEqual(len(coordinator._k10_path), 3)
-        track.side_effect = [([], 1), ([a], 1)]
+        track.side_effect = [([], 1, None), ([a], 1, None)]
         await coordinator._async_update_k10_track(1)  # A new task restarted the track.
         self.assertEqual(coordinator._k10_path, [tuple(a)])
         self.assertEqual(coordinator._k10_track_index, 1)
 
+    async def test_new_path_with_same_point_count_replaces_overlay(self):
+        coordinator = self.coordinator()
+        track = coordinator._k10_api.get_clean_track
+        first = [mm(8, 10), mm(9, 10)]
+        second = [mm(8, 12), mm(9, 12)]
+        track.side_effect = [(first, 2, "1"), ([], 2, "2"), (second, 2, "2")]
+        pose = (*mm(12, 12), 45)
+
+        await coordinator._async_update_k10_track(1)
+        await coordinator._async_update_k10_overlay(pose)
+        first_image = coordinator.map_data["image"]
+        await coordinator._async_update_k10_track(1)
+        await coordinator._async_update_k10_overlay(pose)
+
+        self.assertEqual([call.args[1:] for call in track.await_args_list], [(0,), (2,), ()])
+        self.assertEqual(coordinator._k10_track_id, "2")
+        self.assertEqual(coordinator._k10_path, [tuple(point) for point in second])
+        self.assertNotEqual(coordinator.map_data["image"], first_image)
+
     async def test_unchanged_track_keeps_its_timestamp(self):
         coordinator = self.coordinator()
-        coordinator._k10_api.get_clean_track = AsyncMock(return_value=([mm(8, 10)], 1))
+        coordinator._k10_api.get_clean_track = AsyncMock(return_value=([mm(8, 10)], 1, "1"))
         await coordinator._async_update_k10_track(1)
         first_update = coordinator.path_updated_at
-        coordinator._k10_api.get_clean_track.return_value = ([], 1)
+        coordinator._k10_api.get_clean_track.return_value = ([], 1, "1")
         await coordinator._async_update_k10_track(1)
         self.assertEqual(coordinator.path_updated_at, first_update)
 
@@ -577,7 +604,7 @@ class PathCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         await coordinator._async_update_k10_track(7)
         self.assertEqual(track.await_count, 2)  # Rejections don't retry every idle poll.
         self.assertEqual(coordinator.k10_track_error, "Cannot read cleaning track (code 1004)")
-        track.side_effect, track.return_value = None, ([mm(8, 10)], 1)
+        track.side_effect, track.return_value = None, ([mm(8, 10)], 1, "1")
         await coordinator._async_update_k10_track(1)  # A task retries; success clears it.
         self.assertIsNone(coordinator.k10_track_error)
 
@@ -600,7 +627,7 @@ class PathCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("_frame", coordinator.map_data)  # Later redraws still have the base.
 
     async def test_map_refresh_rereads_track_and_redraws(self):
-        coordinator = self.coordinator(_k10_track_loaded=True, _k10_overlay_drawn=(None, 0))
+        coordinator = self.coordinator(_k10_track_loaded=True, _k10_overlay_drawn=(None, []))
         client = MagicMock()
         client.get_map = AsyncMock(return_value=(k10_map_record(), {"MapID": 101}))
         coordinator._authorize_k10_api = AsyncMock(return_value=client)
@@ -612,7 +639,7 @@ class PathCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         coordinator = self.coordinator(_last_room_refresh=10**12)
         client = MagicMock()
         client.get_properties = AsyncMock(return_value={"CurrentLocation": "[0, 0, 0]"})
-        client.get_clean_track = AsyncMock(return_value=([], 0))
+        client.get_clean_track = AsyncMock(return_value=([], 0, None))
         coordinator._k10_api = client
         coordinator._authorize_k10_api = AsyncMock(return_value=client)
         for status, seconds in ((1, 15), (4, 30), (5, 15), (7, 30)):

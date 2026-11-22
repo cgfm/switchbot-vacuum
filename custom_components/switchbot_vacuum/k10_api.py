@@ -273,14 +273,11 @@ class K10Api:
 
     async def get_clean_track(
         self, session: ClientSession, start: int = 0, max_points: int = 20000
-    ) -> tuple[list[Any], int]:
-        """Read the current or last cleaning track from point ``start``; read-only.
-
-        Returns (points, total): ``[x, y]`` points in millimetres, and the number
-        of points the robot reports for the whole track.
-        """
+    ) -> tuple[list[Any], int, str | None]:
+        """Return track points in millimetres, the total point count and the path ID."""
         points: list[Any] = []
         total = None
+        path_id = None
         while len(points) < max_points:
             result = await self.request(
                 session, "/v1/iot/device/invoke_service",
@@ -308,6 +305,11 @@ class K10Api:
             track = json.loads(track) if isinstance(track, str) else track
             if not isinstance(track, dict):
                 raise K10ProtocolError("Invalid cleaning track response")
+            raw_path_id = track.get("pathID")
+            page_path_id = str(raw_path_id) if raw_path_id is not None else None
+            if points and page_path_id != path_id:
+                raise K10ProtocolError("Cleaning track changed while fetching its points")
+            path_id = page_path_id
             total = track.get("totalPoints")
             page = track.get("posArray")
             if not isinstance(page, list) or not page:
@@ -315,7 +317,7 @@ class K10Api:
             points.extend(page)
             if not isinstance(total, int) or start + len(points) >= total:
                 break
-        return points, total if isinstance(total, int) else start + len(points)
+        return points, total if isinstance(total, int) else start + len(points), path_id
 
     async def set_properties(self, session: ClientSession, items: dict[str, int]) -> None:
         """Set only caller-validated properties using the app's form encoding."""
@@ -399,9 +401,12 @@ class K10Api:
     async def clean_rooms(
         self, session: ClientSession, requested: list[str], times: int = 1, force_order: bool = True,
         mode: str | None = None, fan_level: int | None = None,
+        *, expected_map_id: str | None = None,
     ) -> None:
         async with self.lock:
             map_data, map_info = await self.get_map(session)
+            if expected_map_id is not None and str(map_data["mapId"]) != expected_map_id:
+                raise K10ProtocolError("The K10+ map changed; update the Home Assistant area mapping")
             payload = prepare_rooms(map_data, requested, times, force_order, fan_level)
             properties = await self.get_properties(session)
             if mode is None:

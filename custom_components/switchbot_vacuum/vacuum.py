@@ -364,15 +364,32 @@ class SwitchBotS10Vacuum(CoordinatorEntity[SwitchBotS10Coordinator], StateVacuum
             })
         await self.coordinator.async_request_refresh()
 
+    def _segment_rooms(self) -> dict[str, str]:
+        """Use the K10+ map ID because its room IDs can be reused on other maps."""
+        if not self._is_k10:
+            return self.coordinator.rooms
+        if (map_id := self.coordinator.k10_room_map_id) is None:
+            return {}
+        return {f"{map_id}:{room_id}": name for room_id, name in self.coordinator.rooms.items()}
+
     async def async_get_segments(self) -> list[Segment]:
         """Rooms from the vacuum's map, for mapping to Home Assistant areas."""
         return [
             Segment(id=room_id, name=name)
-            for room_id, name in sorted(self.coordinator.rooms.items(), key=lambda r: r[1])
+            for room_id, name in sorted(self._segment_rooms().items(), key=lambda room: room[1])
         ]
 
     async def async_clean_segments(self, segment_ids: list[str], **kwargs: Any) -> None:
         """Clean the rooms mapped to the requested areas, in the requested order."""
+        if self._is_k10:
+            segment_rooms = self._segment_rooms()
+            if not segment_ids or any(segment_id not in segment_rooms for segment_id in segment_ids):
+                raise HomeAssistantError("The K10+ rooms changed; update the Home Assistant area mapping")
+            room_ids = [segment_id.rpartition(":")[2] for segment_id in segment_ids]
+            await self._async_clean_k10_rooms(
+                room_ids, expected_map_id=self.coordinator.k10_room_map_id
+            )
+            return
         await self.async_clean_rooms(list(segment_ids), force_order=True)
 
     @callback
@@ -386,14 +403,19 @@ class SwitchBotS10Vacuum(CoordinatorEntity[SwitchBotS10Coordinator], StateVacuum
         if (
             VacuumEntityFeature.CLEAN_AREA not in self.supported_features
             or self.registry_entry is None
-            or not self.coordinator.rooms
         ):
             return
+        segment_rooms = self._segment_rooms()
+        if not segment_rooms and (not self._is_k10 or self.coordinator.k10_room_map_id is None):
+            return  # The map has not loaded yet.
         last_seen = self.last_seen_segments
         if last_seen is None:
             return  # The user has not mapped areas yet.
         previous = tuple(sorted(segment.id for segment in last_seen))
-        if previous == tuple(sorted(self.coordinator.rooms)) or previous == self._segments_issue_for:
+        if previous == tuple(sorted(segment_rooms)):
+            self._segments_issue_for = None
+            return
+        if previous == self._segments_issue_for:
             return
         self._segments_issue_for = previous
         self.async_create_segments_issue()
@@ -406,10 +428,13 @@ class SwitchBotS10Vacuum(CoordinatorEntity[SwitchBotS10Coordinator], StateVacuum
     async def _async_clean_k10_rooms(
         self, rooms: list[str], times: int = 1, force_order: bool = True,
         mode: str | None = None, fan_level: int | None = None,
+        *, expected_map_id: str | None = None,
     ) -> None:
         """Clean selected K10+ rooms after the robot confirms the request."""
         try:
-            await self.coordinator.async_clean_k10_rooms(rooms, times, force_order, mode, fan_level)
+            await self.coordinator.async_clean_k10_rooms(
+                rooms, times, force_order, mode, fan_level, expected_map_id=expected_map_id
+            )
         except K10ProtocolError as exc:
             raise HomeAssistantError(str(exc)) from None
         except (aiohttp.ClientError, TimeoutError, ValueError, KeyError, TypeError) as exc:

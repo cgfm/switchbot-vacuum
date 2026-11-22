@@ -185,9 +185,11 @@ class SwitchBotS10Coordinator(DataUpdateCoordinator):
         self.path_updated_at: datetime | None = None
         self.k10_track_error: str | None = None
         self._k10_path: list[tuple[float, float]] = []
+        self.k10_room_map_id: str | None = None
+        self._k10_track_id: str | None = None
         self._k10_track_index = 0  # Track points read so far, including invalid ones.
         self._k10_track_loaded = False  # The whole track was read for this map.
-        self._k10_overlay_drawn: tuple | None = None  # (pose, path length) on the image.
+        self._k10_overlay_drawn: tuple | None = None  # (pose, path) on the image.
         self._last_route_attempt: float = 0
         self._route_refresh_lock = asyncio.Lock()
         self._map_bucket: str | None = None
@@ -452,11 +454,15 @@ class SwitchBotS10Coordinator(DataUpdateCoordinator):
     async def async_clean_k10_rooms(
         self, rooms: list[str], times: int, force_order: bool,
         mode: str | None = None, fan_level: int | None = None,
+        *, expected_map_id: str | None = None,
     ) -> None:
         """Start only validated rooms, preserving their configured suction."""
         session = async_get_clientsession(self.hass)
         api = await self._authorize_k10_api(session)
-        await api.clean_rooms(session, rooms, times, force_order, mode=mode, fan_level=fan_level)
+        await api.clean_rooms(
+            session, rooms, times, force_order, mode=mode, fan_level=fan_level,
+            expected_map_id=expected_map_id,
+        )
 
     async def async_k10_control(self, command: str, value: str | int | None = None) -> None:
         """Execute a supported K10+ control without leaking signed network URLs."""
@@ -486,9 +492,11 @@ class SwitchBotS10Coordinator(DataUpdateCoordinator):
                 session = async_get_clientsession(self.hass)
                 api = await self._authorize_k10_api(session)
                 map_data, _ = await api.get_map(session)
+                map_id = str(map_data["mapId"])
                 self._rooms = {
                     f"room{room_id}": name for room_id, name in room_names(map_data).items()
                 }
+                self.k10_room_map_id = map_id
                 self._last_room_refresh = time.time()
             except K10ProtocolError as exc:
                 # Protocol errors carry only fixed messages and numeric codes.
@@ -872,13 +880,14 @@ class SwitchBotS10Coordinator(DataUpdateCoordinator):
         """Read the whole track once per map, then only new points during a task."""
         if self._k10_track_loaded and working_status not in K10_TASK_STATUSES:
             return
+        map_snapshot = self.map_data
         start = self._k10_track_index if self._k10_track_loaded else 0
         try:
             session = async_get_clientsession(self.hass)
-            points, total = await self._k10_api.get_clean_track(session, start)
-            if total < start:  # A new task restarted the track.
+            points, total, path_id = await self._k10_api.get_clean_track(session, start)
+            if start and (path_id != self._k10_track_id or total < start):
                 start = 0
-                points, total = await self._k10_api.get_clean_track(session, 0)
+                points, _, path_id = await self._k10_api.get_clean_track(session)
         except K10ProtocolError as exc:
             # If there's an error fetching the track but we're idling, don't try
             # fetching it again until there's a new map update or a task starts.
@@ -892,11 +901,14 @@ class SwitchBotS10Coordinator(DataUpdateCoordinator):
             self.k10_track_error = type(exc).__name__
             _LOGGER.debug("K10+ cleaning track unavailable (%s)", type(exc).__name__)
             return
+        if self.map_data is not map_snapshot:
+            return
         self.k10_track_error = None
         path = (self._k10_path if start else []) + parse_track(points)
-        if path != self._k10_path:
+        if path != self._k10_path or path_id != self._k10_track_id:
             self._k10_path = path
             self.path_updated_at = datetime.now().astimezone()
+        self._k10_track_id = path_id
         self._k10_track_index = start + len(points)
         self._k10_track_loaded = True
 
@@ -905,7 +917,7 @@ class SwitchBotS10Coordinator(DataUpdateCoordinator):
     ) -> None:
         """Redraw the path and robot on the map when either has changed."""
         snapshot, path = self.map_data, self._k10_path
-        drawn = (pose, len(path))
+        drawn = (pose, path)
         if snapshot is None or drawn == self._k10_overlay_drawn:
             return
         try:

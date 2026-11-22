@@ -190,7 +190,7 @@ data:
     - dining_room
 ```
 
-Rooms are cleaned in the order given, with each room's settings from the SwitchBot app. If rooms are later added or removed in the app, a Repair issue asks you to update the mapping. Renaming a room keeps its mapping. Use `switchbot_vacuum.clean_rooms` below when you need per-run mode, suction or pass overrides.
+Rooms are cleaned in the order given, with each room's settings from the SwitchBot app. If rooms are later added or removed in the app, a Repair issue asks you to update the mapping. Renaming a room keeps its mapping. On the K10+, switching to a different map also requires updating the mapping. Use `switchbot_vacuum.clean_rooms` below when you need per-run mode, suction or pass overrides.
 
 ### `switchbot_vacuum.clean_rooms`
 
