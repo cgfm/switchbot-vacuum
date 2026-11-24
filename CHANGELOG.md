@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Map two S10 work statuses that reported `unknown`: standby (1) is now `idle` and a pause on the way back to the dock (32) is now `paused`.
+
 ## 0.5.0
 
 First release of the maintained cgfm fork.

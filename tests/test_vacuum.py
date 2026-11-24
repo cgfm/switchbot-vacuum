@@ -10,6 +10,7 @@ from custom_components.switchbot_vacuum.const import (
     WORK_STATUS_CHARGE_DONE,
     WORK_STATUS_CHARGING,
     WORK_STATUS_CLEANING,
+    WORK_STATUS_STANDBY,
 )
 from custom_components.switchbot_vacuum.vacuum import SwitchBotS10Vacuum
 
@@ -73,6 +74,24 @@ class TestVacuumState:
         mock_coordinator.data["work_status"] = 21  # S10 sleeping
         vac = SwitchBotS10Vacuum(mock_coordinator)
         assert vac.activity.value == "idle"
+
+    def test_activity_idle_when_standby(self, mock_coordinator):
+        """Test the S10 standby state maps to IDLE instead of unknown."""
+        mock_coordinator.data["work_status"] = WORK_STATUS_STANDBY
+        vac = SwitchBotS10Vacuum(mock_coordinator)
+        assert vac.activity.value == "idle"
+
+    def test_activity_paused_while_returning(self, mock_coordinator):
+        """Test a pause on the way back to the dock maps to PAUSED."""
+        mock_coordinator.data["work_status"] = 32  # S10 paused while returning to charge
+        vac = SwitchBotS10Vacuum(mock_coordinator)
+        assert vac.activity.value == "paused"
+
+    def test_activity_none_for_unmapped_status(self, mock_coordinator):
+        """Test a status with no mapping still reports no activity."""
+        mock_coordinator.data["work_status"] = 99
+        vac = SwitchBotS10Vacuum(mock_coordinator)
+        assert vac.activity is None
 
     def test_fan_speed(self, mock_coordinator):
         """Test fan speed maps from fan_level."""
