@@ -64,6 +64,7 @@ K10_STATUS_TO_ACTIVITY = {
 
 # S10 native work_status values -> HA activity (confirmed from real API + APK SweeperUtil.smali)
 S10_STATUS_TO_ACTIVITY = {
+    1: VacuumActivity.IDLE,      # standby ✓ (app: "On Standby"; seen on the dock and off it)
     2: VacuumActivity.DOCKED,    # charging ✓
     3: VacuumActivity.DOCKED,    # charge done
     4: VacuumActivity.CLEANING,  # launching
@@ -84,8 +85,9 @@ S10_STATUS_TO_ACTIVITY = {
     19: VacuumActivity.RETURNING,# collecting dust at base ✓ (before charging)
     20: VacuumActivity.DOCKED,   # drying mop ✓
     21: VacuumActivity.IDLE,     # sleeping
-    23: VacuumActivity.CLEANING, # remote control
+    23: VacuumActivity.CLEANING, # remote control ✓
     25: VacuumActivity.RETURNING,# backing to dock for shutdown
+    32: VacuumActivity.PAUSED,   # paused while backing to charge ✓ (app: "paused")
 }
 
 FAN_LEVEL_TO_SPEED = {v: k for k, v in FAN_SPEEDS.items()}
